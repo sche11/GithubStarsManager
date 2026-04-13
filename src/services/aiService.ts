@@ -30,17 +30,28 @@ export class AIService {
       ? this.config.baseUrl
       : `${this.config.baseUrl}/`;
 
-    const versionPrefix = path.split('/')[0] || '';
-
     try {
       const base = new URL(baseUrlWithSlash);
       const basePath = base.pathname.replace(/\/$/, '');
 
-      // 兼容用户把 baseUrl 写成 .../v1 或 .../v1beta 的情况，避免拼成 /v1/v1/...
+      // 检测 baseUrl 中是否已经包含版本前缀 (如 /v1, /v2, /v3, /v1beta 等)
+      const baseVersionMatch = basePath.match(/\/(v\d+(\w+)?)$/);
+      
+      // 检测传入路径是否以版本前缀开头
+      const pathVersionMatch = path.match(/^(v\d+(\w+)?)\/(.+)$/);
+      
+      // 如果 baseUrl 已有版本前缀，且传入路径也以版本前缀开头，则移除传入路径的版本前缀
+      if (baseVersionMatch && pathVersionMatch) {
+        const restPath = pathVersionMatch[3];
+        return new URL(restPath, baseUrlWithSlash).toString();
+      }
+
+      // 保留原有的同版本号匹配逻辑作为兼容
+      const versionPrefix = path.split('/')[0] || '';
       if (versionPrefix) {
         const versionRe = new RegExp(`/${versionPrefix}$`);
         if (versionRe.test(basePath) && path.startsWith(`${versionPrefix}/`)) {
-          const rest = path.slice(versionPrefix.length + 1); // remove "v1/"
+          const rest = path.slice(versionPrefix.length + 1);
           return new URL(rest, baseUrlWithSlash).toString();
         }
       }
