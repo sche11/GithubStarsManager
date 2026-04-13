@@ -38,7 +38,7 @@ export class AIService {
       const baseVersionMatch = basePath.match(/\/(v\d+(\w+)?)$/);
       
       // 检测传入路径是否以版本前缀开头
-      const pathVersionMatch = path.match(/^(v\d+(\w+)?)\/(.+)$/);
+      const pathVersionMatch = path.match(/^(v\d+(\w+)?)\/(.*)$/);
       
       // 如果 baseUrl 已有版本前缀，且传入路径也以版本前缀开头，则移除传入路径的版本前缀
       if (baseVersionMatch && pathVersionMatch) {
@@ -59,6 +59,17 @@ export class AIService {
       return new URL(path, baseUrlWithSlash).toString();
     } catch {
       // baseUrl 非绝对 URL 时这里会抛错；上层会在 testConnection/调用处处理失败
+      // 即使在 catch 中也尝试处理版本前缀重复的情况
+      if (baseUrlWithSlash.includes('/v') && path.startsWith('v')) {
+        // 简单的版本前缀去重逻辑
+        const baseUrlWithoutSlash = baseUrlWithSlash.replace(/\/$/, '');
+        if (baseUrlWithoutSlash.match(/\/v\d+(\w+)?$/)) {
+          const pathParts = path.split('/');
+          if (pathParts.length > 1 && pathParts[0].match(/^v\d+(\w+)?$/)) {
+            return `${baseUrlWithSlash}${pathParts.slice(1).join('/')}`;
+          }
+        }
+      }
       return `${baseUrlWithSlash}${path}`;
     }
   }
