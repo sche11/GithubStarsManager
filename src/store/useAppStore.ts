@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { AppState, Repository, Release, AIConfig, WebDAVConfig, SearchFilters, GitHubUser, Category, AssetFilter, UpdateNotification, AnalysisProgress } from '../types';
+import { AppState, Repository, Release, AIConfig, WebDAVConfig, SearchFilters, GitHubUser, Category, AssetFilter, UpdateNotification, AnalysisProgress, SubscriptionChannel, SubscriptionChannelId, SubscriptionRepo, SubscriptionDev } from '../types';
 import { indexedDBStorage } from '../services/indexedDbStorage';
 import { PRESET_FILTERS } from '../constants/presetFilters';
 
@@ -64,6 +64,10 @@ interface AppActions {
   // Category actions
   addCustomCategory: (category: Category) => void;
   updateCustomCategory: (id: string, updates: Partial<Category>) => void;
+  updateDefaultCategory: (id: string, updates: Partial<Category>) => void;
+  resetDefaultCategory: (id: string) => void;
+  resetDefaultCategoryNameIcon: (id: string) => void;
+  resetDefaultCategoryKeywords: (id: string) => void;
   deleteCustomCategory: (id: string) => void;
   hideDefaultCategory: (id: string) => void;
   showDefaultCategory: (id: string) => void;
@@ -78,7 +82,7 @@ interface AppActions {
   
   // UI actions
   setTheme: (theme: 'light' | 'dark') => void;
-  setCurrentView: (view: 'repositories' | 'releases' | 'settings') => void;
+  setCurrentView: (view: 'repositories' | 'releases' | 'settings' | 'subscription') => void;
   setSelectedCategory: (category: string) => void;
   setLanguage: (language: 'zh' | 'en') => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -102,6 +106,16 @@ interface AppActions {
   toggleReleaseExpandedRepository: (repoId: number) => void;
   setReleaseExpandedRepositories: (repoIds: Set<number>) => void;
   setReleaseIsRefreshing: (refreshing: boolean) => void;
+
+  // Subscription actions
+  setSelectedSubscriptionChannel: (channel: SubscriptionChannelId) => void;
+  setSubscriptionLoading: (channel: SubscriptionChannelId, loading: boolean) => void;
+  setSubscriptionRepos: (channel: SubscriptionChannelId, repos: SubscriptionRepo[]) => void;
+  setSubscriptionDevs: (devs: SubscriptionDev[]) => void;
+  setSubscriptionLastRefresh: (channel: SubscriptionChannelId, timestamp: string) => void;
+  updateSubscriptionRepo: (repo: SubscriptionRepo) => void;
+  updateSubscriptionDev: (dev: SubscriptionDev) => void;
+  toggleSubscriptionChannel: (channelId: SubscriptionChannelId) => void;
 }
 
 const initialSearchFilters: SearchFilters = {
@@ -134,6 +148,7 @@ type PersistedAppState = Partial<
     | 'releases'
     | 'customCategories'
     | 'hiddenDefaultCategoryIds'
+    | 'defaultCategoryOverrides'
     | 'categoryOrder'
     | 'collapsedSidebarCategoryCount'
     | 'assetFilters'
@@ -196,6 +211,12 @@ const normalizePersistedState = (
       return Array.isArray(persistedIds)
         ? persistedIds.filter((id): id is string => typeof id === 'string')
         : [];
+    })(),
+    defaultCategoryOverrides: (() => {
+      const persisted = (safePersisted as Record<string, unknown>).defaultCategoryOverrides;
+      return persisted && typeof persisted === 'object' && !Array.isArray(persisted)
+        ? persisted as Record<string, Partial<Category>>
+        : {};
     })(),
     categoryOrder: Array.isArray(safePersisted.categoryOrder) ? safePersisted.categoryOrder.filter((id: unknown): id is string => typeof id === 'string') : [],
     collapsedSidebarCategoryCount: typeof safePersisted.collapsedSidebarCategoryCount === 'number' && safePersisted.collapsedSidebarCategoryCount > 0 ? safePersisted.collapsedSidebarCategoryCount : 20,
@@ -311,6 +332,41 @@ const defaultPresetFilters: AssetFilter[] = PRESET_FILTERS.map(pf => ({
   icon: PRESET_FILTER_ICONS[pf.id] || 'Package',
 }));
 
+const defaultSubscriptionChannels: SubscriptionChannel[] = [
+  {
+    id: 'most-stars',
+    name: '最多 Star',
+    nameEn: 'Most Stars',
+    icon: '⭐',
+    description: 'GitHub 上 Star 数量最多的项目 Top 10',
+    enabled: true,
+  },
+  {
+    id: 'most-forks',
+    name: '最多 Fork',
+    nameEn: 'Most Forks',
+    icon: '🔱',
+    description: 'GitHub 上 Fork 数量最多的项目 Top 10',
+    enabled: true,
+  },
+  {
+    id: 'most-dev',
+    name: '热门开发者',
+    nameEn: 'Top Developers',
+    icon: '👤',
+    description: 'GitHub 上最受关注的开发者 Top 10 及其最热项目',
+    enabled: true,
+  },
+  {
+    id: 'trending',
+    name: '热门趋势',
+    nameEn: 'Trending',
+    icon: '🔥',
+    description: 'GitHub 上近期最受关注的项目 Top 10',
+    enabled: true,
+  },
+];
+
 export const useAppStore = create<AppState & AppActions>()(
   persist(
     (set) => ({
@@ -333,6 +389,7 @@ export const useAppStore = create<AppState & AppActions>()(
       readReleases: new Set<number>(),
       customCategories: [],
       hiddenDefaultCategoryIds: [],
+      defaultCategoryOverrides: {},
       categoryOrder: [],
       collapsedSidebarCategoryCount: 20,
       assetFilters: defaultPresetFilters,
@@ -349,6 +406,14 @@ export const useAppStore = create<AppState & AppActions>()(
       releaseSearchQuery: '',
       releaseExpandedRepositories: new Set<number>(),
       releaseIsRefreshing: false,
+
+    // Subscription
+    subscriptionChannels: defaultSubscriptionChannels,
+    subscriptionRepos: { 'most-stars': [], 'most-forks': [], 'most-dev': [], 'trending': [] },
+    subscriptionDevs: [],
+    subscriptionLastRefresh: { 'most-stars': null, 'most-forks': null, 'most-dev': null, 'trending': null },
+    subscriptionIsLoading: { 'most-stars': false, 'most-forks': false, 'most-dev': false, 'trending': false },
+    selectedSubscriptionChannel: 'most-stars',
 
       // Auth actions
       setUser: (user) => {
@@ -532,6 +597,178 @@ export const useAppStore = create<AppState & AppActions>()(
           )
         };
       }),
+      updateDefaultCategory: (id, updates) => set((state) => {
+        const defaultCat = defaultCategories.find(c => c.id === id);
+        if (!defaultCat) return {};
+
+        const originalName = defaultCat.name;
+        const displayedName = state.language === 'en' ? translateCategoryName(originalName) : originalName;
+        const originalIcon = defaultCat.icon;
+        const originalKeywords = defaultCat.keywords || [];
+        const currentOverride = state.defaultCategoryOverrides[id];
+        const currentName = currentOverride?.name || originalName;
+        const newName = updates.name;
+
+        const filteredUpdates: { name?: string; icon?: string; keywords?: string[] } = {};
+        
+        if (updates.name !== undefined && updates.name !== '' && updates.name !== originalName && updates.name !== displayedName) {
+          filteredUpdates.name = updates.name;
+        }
+        if (updates.icon !== undefined && updates.icon !== originalIcon) {
+          filteredUpdates.icon = updates.icon;
+        }
+        if (updates.keywords !== undefined) {
+          const sortedOriginal = [...originalKeywords].sort().join(',');
+          const sortedNew = [...updates.keywords].sort().join(',');
+          if (sortedNew !== sortedOriginal) {
+            filteredUpdates.keywords = updates.keywords;
+          }
+        }
+
+        const existingOverride = state.defaultCategoryOverrides[id] || {};
+        const mergedOverride = { ...existingOverride, ...filteredUpdates };
+        
+        for (const key of ['name', 'icon', 'keywords'] as const) {
+          if (key in mergedOverride) {
+            if (key === 'keywords') {
+              const sortedOriginal = [...originalKeywords].sort().join(',');
+              const sortedMerged = [...(mergedOverride.keywords || [])].sort().join(',');
+              if (sortedMerged === sortedOriginal) {
+                delete mergedOverride.keywords;
+              }
+            } else if (key === 'name' && (mergedOverride.name === originalName || mergedOverride.name === displayedName || mergedOverride.name === '')) {
+              delete mergedOverride.name;
+            } else if (key === 'icon' && mergedOverride.icon === originalIcon) {
+              delete mergedOverride.icon;
+            }
+          }
+        }
+
+        const nextOverrides = { ...state.defaultCategoryOverrides };
+        if (Object.keys(mergedOverride).length === 0) {
+          delete nextOverrides[id];
+        } else {
+          nextOverrides[id] = mergedOverride;
+        }
+
+        const currentDisplayedName = currentOverride?.name ?? displayedName;
+        if (!newName || newName === currentName || newName === currentDisplayedName) {
+          return { defaultCategoryOverrides: nextOverrides };
+        }
+
+        const currentNameVariants = getCategoryNameVariants(originalName, currentName);
+        // Avoid self-rewrite when newName already matches the displayed default name.
+
+        const nextRepositories = state.repositories.map(repo =>
+          currentNameVariants.includes(repo.custom_category || '')
+            ? { ...repo, custom_category: newName, last_edited: new Date().toISOString() }
+            : repo
+        );
+
+        return {
+          defaultCategoryOverrides: nextOverrides,
+          repositories: nextRepositories,
+          searchResults: state.searchResults.map(repo =>
+            currentNameVariants.includes(repo.custom_category || '')
+              ? { ...repo, custom_category: newName, last_edited: new Date().toISOString() }
+              : repo
+          )
+        };
+      }),
+      resetDefaultCategory: (id) => set((state) => {
+        const defaultCat = defaultCategories.find(c => c.id === id);
+        if (!defaultCat) return {};
+
+        const override = state.defaultCategoryOverrides[id];
+        if (!override) return {};
+
+        const overriddenName = override.name;
+        const originalName = defaultCat.name;
+
+        const nextOverrides = { ...state.defaultCategoryOverrides };
+        delete nextOverrides[id];
+
+        if (!overriddenName || overriddenName === originalName) {
+          return { defaultCategoryOverrides: nextOverrides };
+        }
+
+        const overriddenNameVariants = getCategoryNameVariants(originalName, overriddenName);
+
+        const nextRepositories = state.repositories.map(repo =>
+          overriddenNameVariants.includes(repo.custom_category || '')
+            ? { ...repo, custom_category: originalName, last_edited: new Date().toISOString() }
+            : repo
+        );
+
+        return {
+          defaultCategoryOverrides: nextOverrides,
+          repositories: nextRepositories,
+          searchResults: state.searchResults.map(repo =>
+            overriddenNameVariants.includes(repo.custom_category || '')
+              ? { ...repo, custom_category: originalName, last_edited: new Date().toISOString() }
+              : repo
+          )
+        };
+      }),
+      resetDefaultCategoryNameIcon: (id) => set((state) => {
+        const defaultCat = defaultCategories.find(c => c.id === id);
+        if (!defaultCat) return {};
+
+        const override = state.defaultCategoryOverrides[id];
+        if (!override) return {};
+
+        const overriddenName = override.name;
+        const originalName = defaultCat.name;
+
+        const nextOverride = { ...override };
+        delete nextOverride.name;
+        delete nextOverride.icon;
+
+        const nextOverrides = { ...state.defaultCategoryOverrides };
+        if (Object.keys(nextOverride).length === 0) {
+          delete nextOverrides[id];
+        } else {
+          nextOverrides[id] = nextOverride;
+        }
+
+        if (!overriddenName || overriddenName === originalName) {
+          return { defaultCategoryOverrides: nextOverrides };
+        }
+
+        const overriddenNameVariants = getCategoryNameVariants(originalName, overriddenName);
+
+        const nextRepositories = state.repositories.map(repo =>
+          overriddenNameVariants.includes(repo.custom_category || '')
+            ? { ...repo, custom_category: originalName, last_edited: new Date().toISOString() }
+            : repo
+        );
+
+        return {
+          defaultCategoryOverrides: nextOverrides,
+          repositories: nextRepositories,
+          searchResults: state.searchResults.map(repo =>
+            overriddenNameVariants.includes(repo.custom_category || '')
+              ? { ...repo, custom_category: originalName, last_edited: new Date().toISOString() }
+              : repo
+          )
+        };
+      }),
+      resetDefaultCategoryKeywords: (id) => set((state) => {
+        const override = state.defaultCategoryOverrides[id];
+        if (!override) return {};
+
+        const nextOverride = { ...override };
+        delete nextOverride.keywords;
+
+        const nextOverrides = { ...state.defaultCategoryOverrides };
+        if (Object.keys(nextOverride).length === 0) {
+          delete nextOverrides[id];
+        } else {
+          nextOverrides[id] = nextOverride;
+        }
+
+        return { defaultCategoryOverrides: nextOverrides };
+      }),
       deleteCustomCategory: (id) => set((state) => {
         const targetCategory = state.customCategories.find(category => category.id === id);
         const nextSelectedCategory = state.selectedCategory === id ? 'all' : state.selectedCategory;
@@ -571,7 +808,7 @@ export const useAppStore = create<AppState & AppActions>()(
       })),
       setCategoryOrder: (order) => set({ categoryOrder: order }),
       reorderCategories: (oldIndex, newIndex) => set((state) => {
-        const allCategories = getAllCategories(state.customCategories, state.language, state.hiddenDefaultCategoryIds);
+        const allCategories = getAllCategories(state.customCategories, state.language, state.hiddenDefaultCategoryIds, state.defaultCategoryOverrides);
         const orderedCategories = sortCategoriesByOrder(allCategories, state.categoryOrder);
         const newOrder = orderedCategories.map(c => c.id);
         const [movedId] = newOrder.splice(oldIndex, 1);
@@ -630,10 +867,41 @@ export const useAppStore = create<AppState & AppActions>()(
       }),
       setReleaseExpandedRepositories: (releaseExpandedRepositories) => set({ releaseExpandedRepositories }),
       setReleaseIsRefreshing: (releaseIsRefreshing) => set({ releaseIsRefreshing }),
+
+    // Subscription actions
+    setSelectedSubscriptionChannel: (selectedSubscriptionChannel) => set({ selectedSubscriptionChannel }),
+    setSubscriptionLoading: (channel, loading) => set((state) => ({
+      subscriptionIsLoading: { ...state.subscriptionIsLoading, [channel]: loading },
+    })),
+    setSubscriptionRepos: (channel, repos) => set((state) => ({
+      subscriptionRepos: { ...state.subscriptionRepos, [channel]: repos },
+    })),
+    setSubscriptionDevs: (devs) => set({ subscriptionDevs: devs }),
+    setSubscriptionLastRefresh: (channel, timestamp) => set((state) => ({
+      subscriptionLastRefresh: { ...state.subscriptionLastRefresh, [channel]: timestamp },
+    })),
+    updateSubscriptionRepo: (repo) => set((state) => {
+      const channel = repo.channel;
+      const channelRepos = state.subscriptionRepos[channel] || [];
+      return {
+        subscriptionRepos: {
+          ...state.subscriptionRepos,
+          [channel]: channelRepos.map(r => r.id === repo.id ? repo : r),
+        },
+      };
+    }),
+    updateSubscriptionDev: (dev) => set((state) => ({
+      subscriptionDevs: state.subscriptionDevs.map(d => d.login === dev.login ? dev : d),
+    })),
+    toggleSubscriptionChannel: (channelId) => set((state) => ({
+      subscriptionChannels: state.subscriptionChannels.map(ch =>
+        ch.id === channelId ? { ...ch, enabled: !ch.enabled } : ch
+      ),
+    })),
     }),
     {
       name: 'github-stars-manager',
-      version: 3,
+      version: 5,
       storage: createJSONStorage(() => indexedDBStorage),
       partialize: (state) => ({
         // 持久化用户信息和认证状态
@@ -664,6 +932,7 @@ export const useAppStore = create<AppState & AppActions>()(
         hiddenDefaultCategoryIds: state.hiddenDefaultCategoryIds,
         categoryOrder: state.categoryOrder,
         collapsedSidebarCategoryCount: state.collapsedSidebarCategoryCount,
+        defaultCategoryOverrides: state.defaultCategoryOverrides,
 
         // 持久化资源过滤器
         assetFilters: state.assetFilters,
@@ -688,6 +957,13 @@ export const useAppStore = create<AppState & AppActions>()(
         releaseSelectedFilters: state.releaseSelectedFilters,
         releaseSearchQuery: state.releaseSearchQuery,
         releaseExpandedRepositories: Array.from(state.releaseExpandedRepositories),
+
+      // 持久化订阅设置
+      subscriptionChannels: state.subscriptionChannels,
+      selectedSubscriptionChannel: state.selectedSubscriptionChannel,
+      subscriptionRepos: state.subscriptionRepos,
+      subscriptionDevs: state.subscriptionDevs,
+      subscriptionLastRefresh: state.subscriptionLastRefresh,
       }),
       migrate: (persistedState) => {
         // 版本升级适配处理
@@ -705,6 +981,12 @@ export const useAppStore = create<AppState & AppActions>()(
           state.collapsedSidebarCategoryCount = 20;
         }
 
+        // 从旧版本升级时，确保 defaultCategoryOverrides 字段存在
+        if (state && typeof state.defaultCategoryOverrides !== 'object') {
+          console.log('Migrating from old version: initializing defaultCategoryOverrides');
+          state.defaultCategoryOverrides = {};
+        }
+
         // 迁移仓库数据中的旧标记
         if (state && Array.isArray(state.repositories)) {
           let migratedCount = 0;
@@ -720,6 +1002,24 @@ export const useAppStore = create<AppState & AppActions>()(
             console.log(`Migrated ${migratedCount} repositories: converted '__EMPTY__' to empty string`);
           }
         }
+
+  // 迁移订阅频道（版本 4→5：daily-dev → most-dev，新增 trending）
+  if (state && !Array.isArray(state.subscriptionChannels)) {
+    console.log('Migrating: initializing subscription channels');
+    state.subscriptionChannels = defaultSubscriptionChannels;
+  } else if (state && Array.isArray(state.subscriptionChannels)) {
+    state.subscriptionChannels = state.subscriptionChannels.map((ch: Record<string, unknown>) => {
+      if (ch.id === 'daily-dev' || ch.id === 'most-dev') {
+        return { ...ch, id: 'most-dev', name: '热门开发者', nameEn: 'Top Developers', icon: '👤' };
+      }
+      return ch;
+    });
+  }
+  if (state && !state.selectedSubscriptionChannel) {
+    state.selectedSubscriptionChannel = 'most-stars';
+  } else if (state && state.selectedSubscriptionChannel === 'daily-dev') {
+    state.selectedSubscriptionChannel = 'most-dev';
+  }
 
         return state as PersistedAppState;
       },
@@ -779,14 +1079,20 @@ export const sortCategoriesByOrder = (
 export const getAllCategories = (
   customCategories: Category[],
   language: 'zh' | 'en' = 'zh',
-  hiddenDefaultCategoryIds: string[] = []
+  hiddenDefaultCategoryIds: string[] = [],
+  defaultCategoryOverrides: Record<string, Partial<Category>> = {}
 ): Category[] => {
   const translatedDefaults = defaultCategories
     .filter(cat => !hiddenDefaultCategoryIds.includes(cat.id))
-    .map(cat => ({
-      ...cat,
-      name: language === 'en' ? translateCategoryName(cat.name) : cat.name
-    }));
+    .map(cat => {
+      const override = defaultCategoryOverrides[cat.id];
+      const baseName = language === 'en' ? translateCategoryName(cat.name) : cat.name;
+      return {
+        ...cat,
+        name: baseName,
+        ...(override ? { name: override.name ?? baseName, icon: override.icon ?? cat.icon, keywords: override.keywords ?? cat.keywords } : {})
+      };
+    });
 
   return [...translatedDefaults, ...customCategories];
 };
@@ -811,4 +1117,30 @@ const translateCategoryName = (zhName: string): string => {
   };
   
   return translations[zhName] || zhName;
+};
+
+// Helper function to get all possible name variants for a category (original + translated)
+const getCategoryNameVariants = (originalName: string, overrideName?: string): string[] => {
+  const variants = new Set<string>();
+  
+  // Add original name
+  variants.add(originalName);
+  
+  // Add translated name
+  const translated = translateCategoryName(originalName);
+  if (translated !== originalName) {
+    variants.add(translated);
+  }
+  
+  // Add override name if provided and different
+  if (overrideName && overrideName !== originalName) {
+    variants.add(overrideName);
+    // Also add translated version of override if it matches a known pattern
+    const overrideTranslated = translateCategoryName(overrideName);
+    if (overrideTranslated !== overrideName) {
+      variants.add(overrideTranslated);
+    }
+  }
+  
+  return Array.from(variants);
 };
