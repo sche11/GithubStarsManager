@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { GripVertical, Star, ExternalLink, Calendar, Bell, BellOff, Bot, Sparkles, Monitor, Smartphone, Globe, Terminal, Package, Edit3, BookOpen, Apple, Square, CheckSquare, Loader2 } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { GripVertical, Star, StarOff, ExternalLink, Calendar, Bell, BellOff, Bot, Sparkles, Monitor, Smartphone, Globe, Terminal, Package, Edit3, BookOpen, Apple, Square, CheckSquare, Loader2 } from 'lucide-react';
 import { Repository, Category } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { getAICategory, getDefaultCategory } from '../utils/categoryUtils';
@@ -275,6 +276,16 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
     const activeConfig = aiConfigs.find(config => config.id === activeAIConfig);
     if (!activeConfig) {
       alert(language === 'zh' ? '请先在设置中配置AI服务。' : 'Please configure AI service in settings first.');
+      return;
+    }
+
+    if (activeConfig.apiKeyStatus === 'decrypt_failed') {
+      alert(language === 'zh' ? 'AI服务的API密钥无法解密，请在设置中重新输入并保存该配置。' : 'The AI service API key could not be decrypted. Please re-enter and save the configuration in settings.');
+      return;
+    }
+
+    if (!activeConfig.baseUrl || !activeConfig.apiKey || !activeConfig.model) {
+      alert(language === 'zh' ? 'AI服务配置不完整，请检查API端点、密钥和模型名称。' : 'AI service configuration is incomplete. Please check the API endpoint, key, and model name.');
       return;
     }
 
@@ -700,7 +711,7 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
 
   // 使用 useMemo 缓存卡片类名，避免重复计算
   const cardClassName = useMemo(() => {
-    const baseClasses = 'repository-card group bg-white dark:bg-panel-dark rounded-xl border border-black/[0.06] dark:border-white/[0.04] p-6 hover:shadow-subtle transition-shadow transition-colors duration-200 hover:border-black/[0.06] dark:border-white/[0.04] dark:hover:border-white/20 flex flex-col h-full cursor-pointer select-none';
+    const baseClasses = 'repository-card group bg-white dark:bg-panel-dark rounded-xl border border-black/[0.06] dark:border-white/[0.04] p-6 shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 hover:border-black/10 dark:hover:border-white/10 flex flex-col h-full cursor-pointer select-none';
     const selectedClasses = isSelected
       ? 'shadow-[0_0_0_2px_theme(colors.blue.500)] dark:shadow-[0_0_0_2px_theme(colors.brand.violet)] bg-gray-100 dark:bg-white/[0.04] dark:bg-brand-indigo/10'
       : '';
@@ -799,7 +810,7 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
             onClick={() => toggleReleaseSubscription(repository.id)}
             selectionMode={selectionMode}
             className={`${isSubscribed
-              ? 'bg-gray-200 text-gray-900 dark:bg-white/[0.08] dark:text-text-primary'
+              ? 'bg-brand-indigo text-white shadow-sm dark:bg-brand-indigo/80 dark:text-white'
               : 'bg-gray-100 text-gray-700 dark:bg-white/[0.04] dark:text-text-secondary hover:bg-gray-200 hover:text-gray-900 dark:hover:bg-white/[0.08] dark:hover:text-text-primary'
             }`}
             title={isSubscribed ? (language === 'zh' ? '取消订阅发布' : 'Unsubscribe from releases') : (language === 'zh' ? '订阅发布' : 'Subscribe to releases')}
@@ -845,7 +856,7 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
             variant="unstar"
             title={language === 'zh' ? '取消 Star' : 'Unstar'}
           >
-            <Star className={`w-4 h-4 ${unstarring ? 'animate-pulse' : ''}`} />
+            <StarOff className={`w-4 h-4 ${unstarring ? 'animate-pulse' : ''}`} />
           </SelectionAwareButton>
         </div>
       </div>
@@ -991,19 +1002,25 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
         </div>
       </div>
 
-      {/* Repository Edit Modal */}
-      <RepositoryEditModal
-        isOpen={editModalOpen}
-        onClose={() => setEditModalOpen(false)}
-        repository={repository}
-      />
+      {/* Repository Edit Modal - Using portal to render outside card container */}
+      {editModalOpen && createPortal(
+        <RepositoryEditModal
+          isOpen={editModalOpen}
+          onClose={() => setEditModalOpen(false)}
+          repository={repository}
+        />,
+        document.body
+      )}
 
-      {/* README Modal */}
-      <ReadmeModal
-        isOpen={readmeModalOpen}
-        onClose={() => setReadmeModalOpen(false)}
-        repository={repository}
-      />
+      {/* README Modal - Using portal to render outside card container */}
+      {readmeModalOpen && createPortal(
+        <ReadmeModal
+          isOpen={readmeModalOpen}
+          onClose={() => setReadmeModalOpen(false)}
+          repository={repository}
+        />,
+        document.body
+      )}
     </div>
   );
 };
