@@ -15,7 +15,7 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
   return (
     <div className="space-y-6">
       <div className="flex items-center space-x-3">
-        <Package className="w-6 h-6 text-status-emerald " />
+        <Package className="w-6 h-6 text-gray-700 dark:text-text-secondary" />
         <h3 className="text-lg font-semibold text-gray-900 dark:text-text-primary">
           {t('通用设置', 'General Settings')}
         </h3>
@@ -23,7 +23,7 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
 
       <div className="p-6 bg-white dark:bg-panel-dark rounded-xl border border-black/[0.06] dark:border-white/[0.04]">
         <div className="flex items-center space-x-3 mb-4">
-          <Globe className="w-5 h-5 text-brand-violet dark:text-brand-violet" />
+          <Globe className="w-5 h-5 text-gray-700 dark:text-text-secondary" />
           <h4 className="font-medium text-gray-900 dark:text-text-primary">
             {t('语言设置', 'Language Settings')}
           </h4>
@@ -37,7 +37,7 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
               value="zh"
               checked={language === 'zh'}
               onChange={(e) => setLanguage(e.target.value as 'zh' | 'en')}
-              className="w-4 h-4 text-brand-violet bg-light-surfaceborder-black/[0.06] focus:ring-brand-violet dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-white/[0.04] dark:border-white/[0.04]"
+              className="w-4 h-4 text-brand-violet bg-light-surface border-black/[0.06] focus:ring-brand-violet dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-white/[0.04] dark:border-white/[0.04]"
             />
             <div>
               <span className="text-base font-medium text-gray-900 dark:text-text-primary">
@@ -55,7 +55,7 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
               value="en"
               checked={language === 'en'}
               onChange={(e) => setLanguage(e.target.value as 'zh' | 'en')}
-              className="w-4 h-4 text-brand-violet bg-light-surfaceborder-black/[0.06] focus:ring-brand-violet dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-white/[0.04] dark:border-white/[0.04]"
+              className="w-4 h-4 text-brand-violet bg-light-surface border-black/[0.06] focus:ring-brand-violet dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-white/[0.04] dark:border-white/[0.04]"
             />
             <div>
               <span className="text-base font-medium text-gray-900 dark:text-text-primary">
@@ -92,7 +92,7 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
 
       <div className="p-6 bg-white dark:bg-panel-dark rounded-xl border border-black/[0.06] dark:border-white/[0.04]">
         <div className="flex items-center space-x-3 mb-4">
-          <Mail className="w-5 h-5 text-status-emerald " />
+          <Mail className="w-5 h-5 text-gray-700 dark:text-text-secondary" />
           <h4 className="font-medium text-gray-900 dark:text-text-primary">
             {t('联系方式', 'Contact Information')}
           </h4>
