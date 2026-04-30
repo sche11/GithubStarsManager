@@ -145,6 +145,9 @@ interface AppActions {
   setLanguage: (language: 'zh' | 'en') => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   setReadmeModalOpen: (open: boolean) => void;
+
+  // Hydration state
+  setHasHydrated: (hydrated: boolean) => void;
   
   // Update actions
   setUpdateNotification: (notification: UpdateNotification | null) => void;
@@ -165,6 +168,7 @@ interface AppActions {
   toggleReleaseExpandedRepository: (repoId: number) => void;
   setReleaseExpandedRepositories: (repoIds: Set<number>) => void;
   setReleaseIsRefreshing: (refreshing: boolean) => void;
+  setIncludePreRelease: (include: boolean) => void;
 
   // Discovery actions
   setSelectedDiscoveryChannel: (channel: DiscoveryChannelId) => void;
@@ -232,6 +236,7 @@ type PersistedAppState = Partial<
     | 'releaseViewMode'
     | 'releaseSelectedFilters'
     | 'releaseSearchQuery'
+    | 'includePreRelease'
     | 'discoveryChannels'
     | 'discoveryRepos'
     | 'discoveryLastRefresh'
@@ -276,6 +281,29 @@ const normalizePersistedState = (
   const repositories = Array.isArray(safePersisted.repositories) ? safePersisted.repositories : [];
   const releases = Array.isArray(safePersisted.releases) ? safePersisted.releases : [];
 
+  // Migration for old users: mark repos with existing releases as already synced
+  const migratedRepositories = repositories.map(repo => {
+    const hasExistingRelease = releases.some(r => r.repository?.id === repo.id);
+    if (hasExistingRelease && !repo.has_fetched_releases) {
+      // Backfill last_release_fetch_time from the latest persisted release timestamp
+      const repoReleases = releases.filter(r => r.repository?.id === repo.id);
+      const latestReleaseTime = repoReleases.length > 0
+        ? Math.max(...repoReleases.map(r => new Date(r.published_at).getTime()))
+        : null;
+      return {
+        ...repo,
+        has_fetched_releases: true,
+        last_release_fetch_time: repo.last_release_fetch_time || (latestReleaseTime ? new Date(latestReleaseTime).toISOString() : new Date().toISOString())
+      };
+    }
+    return repo;
+  });
+
+  // Default includePreRelease to true if not set (backward compatibility)
+  const includePreRelease = safePersisted.includePreRelease !== undefined
+    ? safePersisted.includePreRelease
+    : true;
+
   return {
     ...currentState,
     ...safePersisted,
@@ -283,12 +311,13 @@ const normalizePersistedState = (
       safePersisted.theme === 'light' || safePersisted.theme === 'dark'
         ? safePersisted.theme
         : 'dark',
-    repositories,
+    repositories: migratedRepositories,
     releases,
-    searchResults: repositories,
+    searchResults: migratedRepositories,
     releaseSubscriptions: normalizeNumberSet(safePersisted.releaseSubscriptions),
     readReleases: normalizeNumberSet(safePersisted.readReleases),
     releaseExpandedRepositories: normalizeNumberSet(safePersisted.releaseExpandedRepositories),
+    includePreRelease,
     searchFilters: {
       ...initialSearchFilters,
       ...safePersisted.searchFilters,
@@ -643,6 +672,7 @@ export const useAppStore = create<AppState & AppActions>()(
       collapsedSidebarCategoryCount: 20,
       assetFilters: defaultPresetFilters,
       theme: 'dark',
+      hasHydrated: false,
       currentView: 'repositories',
       selectedCategory: 'all',
       language: 'zh',
@@ -656,6 +686,7 @@ export const useAppStore = create<AppState & AppActions>()(
       releaseSearchQuery: '',
       releaseExpandedRepositories: new Set<number>(),
       releaseIsRefreshing: false,
+      includePreRelease: true,
 
       discoveryChannels: defaultDiscoveryChannels,
       discoveryRepos: { 'trending': [], 'hot-release': [], 'most-popular': [], 'topic': [], 'search': [] },
@@ -1150,6 +1181,9 @@ export const useAppStore = create<AppState & AppActions>()(
       setLanguage: (language) => set({ language }),
       setSidebarCollapsed: (isSidebarCollapsed) => set({ isSidebarCollapsed }),
       setReadmeModalOpen: (readmeModalOpen) => set({ readmeModalOpen }),
+
+      // Hydration state
+      setHasHydrated: (hasHydrated) => set({ hasHydrated }),
       
       // Update actions
       setUpdateNotification: (notification) => set({ updateNotification: notification }),
@@ -1181,6 +1215,7 @@ export const useAppStore = create<AppState & AppActions>()(
       }),
       setReleaseExpandedRepositories: (releaseExpandedRepositories) => set({ releaseExpandedRepositories }),
       setReleaseIsRefreshing: (releaseIsRefreshing) => set({ releaseIsRefreshing }),
+      setIncludePreRelease: (includePreRelease) => set({ includePreRelease }),
 
     // Discovery actions
     setSelectedDiscoveryChannel: (selectedDiscoveryChannel) => set((state) => ({
@@ -1327,6 +1362,7 @@ export const useAppStore = create<AppState & AppActions>()(
         releaseSelectedFilters: state.releaseSelectedFilters,
         releaseSearchQuery: state.releaseSearchQuery,
         releaseExpandedRepositories: Array.from(state.releaseExpandedRepositories),
+        includePreRelease: state.includePreRelease,
 
       // 持久化发现设置
       discoveryChannels: state.discoveryChannels,
@@ -1487,6 +1523,14 @@ export const useAppStore = create<AppState & AppActions>()(
           ...currentState,
           ...normalized,
         };
+      },
+      onRehydrateStorage: (state) => (_rehydratedState, error) => {
+        if (error) {
+          console.error('Store hydration failed', error);
+        } else {
+          console.log('Store hydration complete');
+        }
+        state.setHasHydrated(true);
       },
     }
   )
