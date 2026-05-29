@@ -1,6 +1,7 @@
 import { Repository, AIConfig, AIApiType } from '../types';
 import { backend } from './backendAdapter';
 import { buildApiUrl, buildFinalApiUrl } from '../utils/apiUrlBuilder';
+import { logger } from './logger';
 
 interface OpenAIResponseContentPart {
   text?: string;
@@ -67,6 +68,23 @@ export class AIService {
   }
 
   /**
+   * Log AI request details at debug level (only logged when debug mode is on).
+   */
+  private logAIRequestDebug(
+    startTime: number,
+    context: { apiType: string; model: string; configId: string },
+    result: { responseLength: number } | { error: string }
+  ): void {
+    if (logger.isDebugMode()) {
+      logger.debug('ai', 'AI request', {
+        ...context,
+        durationMs: Date.now() - startTime,
+        ...result,
+      });
+    }
+  }
+
+  /**
    * 清理用户内容中可能导致 JSON 序列化问题的字符
    * - 移除 null 字节和控制字符（保留 \n \r \t）
    * - 替换孤立代理项（lone surrogates），避免某些 JSON 解析器报错
@@ -121,7 +139,10 @@ export class AIService {
     maxTokens: number;
     signal?: AbortSignal;
   }): Promise<string> {
+    const startTime = Date.now();
     const apiType = this.getApiType();
+    const model = this.config.model;
+    const configId = this.config.id;
     const reasoning = this.getOpenAIReasoningPayload();
 
     if (apiType === 'openai' || apiType === 'openai-responses' || apiType === 'openai-compatible') {
@@ -169,6 +190,7 @@ export class AIService {
         });
         if (!response.ok) {
           const errorDetail = await this.extractErrorDetail(response);
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { error: 'request failed' });
           throw new Error(`AI API error: ${response.status} ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ''}`);
         }
         data = await response.json();
@@ -177,7 +199,10 @@ export class AIService {
       if (apiType === 'openai-responses') {
         const typedData = data as OpenAIResponse;
         const outputText = typedData.output_text;
-        if (outputText) return outputText;
+        if (outputText) {
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { responseLength: outputText.length });
+          return outputText;
+        }
 
         const output = typedData.output;
         if (Array.isArray(output)) {
@@ -185,19 +210,29 @@ export class AIService {
             .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
             .map((part) => part?.text || '')
             .join('');
-          if (text) return text;
+          if (text) {
+            this.logAIRequestDebug(startTime, { apiType, model, configId }, { responseLength: text.length });
+            return text;
+          }
         }
       } else {
         const typedData = data as { choices?: OpenAIResponseChoice[] };
         const choices = typedData.choices;
         const message = choices?.[0]?.message;
         const content = message?.content;
-        if (content) return content;
+        if (content) {
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { responseLength: content.length });
+          return content;
+        }
 
         const reasoningContent = message?.reasoning_content;
-        if (reasoningContent) return reasoningContent;
+        if (reasoningContent) {
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { responseLength: reasoningContent.length });
+          return reasoningContent;
+        }
       }
 
+      this.logAIRequestDebug(startTime, { apiType, model, configId }, { error: 'request failed' });
       throw new Error('No content received from AI service');
     }
 
@@ -228,6 +263,7 @@ export class AIService {
         });
         if (!response.ok) {
           const errorDetail = await this.extractErrorDetail(response);
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { error: 'request failed' });
           throw new Error(`AI API error: ${response.status} ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ''}`);
         }
         data = await response.json();
@@ -242,14 +278,18 @@ export class AIService {
             return block.type === 'text' && typeof block.text === 'string' ? block.text : '';
           })
           .join('');
-        if (text) return text;
+        if (text) {
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { responseLength: text.length });
+          return text;
+        }
       }
+      this.logAIRequestDebug(startTime, { apiType, model, configId }, { error: 'request failed' });
       throw new Error('No content received from AI service');
     }
 
     // gemini
     const rawModel = this.config.model.trim();
-    const model = rawModel.startsWith('models/') ? rawModel.slice('models/'.length) : rawModel;
+    const geminiModel = rawModel.startsWith('models/') ? rawModel.slice('models/'.length) : rawModel;
     const prompt = options.system ? `${options.system}
 
 ${options.user}` : options.user;
@@ -270,7 +310,7 @@ ${options.user}` : options.user;
     if (backend.isAvailable) {
       data = await backend.proxyAIRequestWithFallback(this.config.id, this.config, requestBody, options.signal);
     } else {
-      const path = `v1beta/models/${encodeURIComponent(model)}:generateContent`;
+      const path = `v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`;
       const urlObj = new URL(buildApiUrl(this.config.baseUrl, path));
       urlObj.searchParams.set('key', this.config.apiKey);
       const response = await fetch(urlObj.toString(), {
@@ -284,6 +324,7 @@ ${options.user}` : options.user;
       });
       if (!response.ok) {
         const errorDetail = await this.extractErrorDetail(response);
+        this.logAIRequestDebug(startTime, { apiType, model, configId }, { error: 'request failed' });
         throw new Error(`AI API error: ${response.status} ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ''}`);
       }
       data = await response.json();
@@ -303,9 +344,13 @@ ${options.user}` : options.user;
             return typeof part.text === 'string' ? part.text : '';
           })
           .join('');
-        if (text) return text;
+        if (text) {
+          this.logAIRequestDebug(startTime, { apiType, model, configId }, { responseLength: text.length });
+          return text;
+        }
       }
     }
+    this.logAIRequestDebug(startTime, { apiType, model, configId }, { error: 'request failed' });
     throw new Error('No content received from AI service');
   }
 
@@ -314,14 +359,21 @@ ${options.user}` : options.user;
     tags: string[];
     platforms: string[];
   }> {
+    const startTime = Date.now();
+    const configId = this.config.id;
+    const { full_name } = repository;
+    const owner = full_name.split('/')[0] || '';
+    const repo = full_name.split('/')[1] || full_name;
+    logger.info('ai', 'AI analysis started', { owner, repo, configId });
+
     const prompt = this.config.useCustomPrompt && this.config.customPrompt
       ? this.createCustomAnalysisPrompt(repository, readmeContent, customCategories)
       : this.createAnalysisPrompt(repository, readmeContent, customCategories);
-    
+
     try {
       const system = this.language === 'zh'
-        ? '你是一个专业的GitHub仓库分析助手。请严格按照用户指定的语言进行分析，无论原始内容是什么语言。请用中文简洁地分析仓库，提供实用的概述、分类标签和支持的平台类型。'
-        : 'You are a professional GitHub repository analysis assistant. Please strictly analyze in the language specified by the user, regardless of the original content language. Please analyze repositories concisely in English, providing practical overviews, category tags, and supported platform types.';
+        ? '你是一个专业的GitHub仓库分析助手。请严格按照用户指定的语言进行分析，无论原始内容是什么语言。请用中文简洁地分析仓库，提供实用的概述、分类标签和支持的平台类型。只输出合法JSON，不要输出思考过程、Markdown、代码块标记或任何额外文本。'
+        : 'You are a professional GitHub repository analysis assistant. Please strictly analyze in the language specified by the user, regardless of the original content language. Please analyze repositories concisely in English, providing practical overviews, category tags, and supported platform types. Only output valid JSON. Do not output thinking process, Markdown, code block markers, or any extra text.';
 
       const content = await this.requestText({
         system,
@@ -331,9 +383,11 @@ ${options.user}` : options.user;
         signal,
       });
 
-      return this.parseAIResponse(content);
+      const result = this.parseAIResponse(content);
+      logger.info('ai', 'AI analysis completed', { owner, repo, configId, durationMs: Date.now() - startTime });
+      return result;
     } catch (error) {
-      console.error('AI analysis failed:', error);
+      logger.errorFromError('ai', 'AI analysis failed', error, { configId, durationMs: Date.now() - startTime });
       // 抛出错误，让调用方处理失败状态
       throw error;
     }
@@ -376,56 +430,60 @@ ${this.language === 'zh' ? 'README内容 (前2000字符)' : 'README Content (fir
 ${this.sanitizeForPrompt(readmeContent.substring(0, 2000))}
     `.trim();
 
-    const categoriesInfo = customCategories && customCategories.length > 0 
-      ? `\n\n${this.language === 'zh' ? '可用的应用分类' : 'Available Application Categories'}: ${customCategories.join(', ')}`
-      : '';
-
     if (this.language === 'zh') {
+      const categoriesLine = customCategories && customCategories.length > 0
+        ? `\n可用分类（tags 请优先从中选择）：${customCategories.join(', ')}`
+        : '';
       return `
-请分析这个GitHub仓库并提供：
+请分析以下GitHub仓库信息，并只输出合法JSON对象。不要输出思考过程、Markdown、代码块标记、解释或任何额外文本。
 
-1. 一个简洁的中文概述（不超过50字），说明这个仓库的主要功能和用途
-2. 3-5个相关的应用类型标签（用中文，类似应用商店的分类，如：开发工具、Web应用、移动应用、数据库、AI工具等${customCategories ? '，请优先从提供的分类中选择' : ''}）
-3. 支持的平台类型（从以下选择：mac、windows、linux、ios、android、docker、web、cli）
+要求：
+- summary：中文概述，说明仓库的主要功能和用途，不超过50字。
+- tags：3-5个中文应用类型标签${customCategories && customCategories.length > 0 ? '，请优先从上方的可用分类中选择' : '，类似应用商店的分类，如：开发工具、Web应用、移动应用、数据库、AI工具等'}。${categoriesLine}
+- platforms：只能从 ["mac","windows","linux","ios","android","docker","web","cli"] 中选择；无法判断则为 []。
 
-重要：请严格使用中文进行分析和回复，无论原始README是什么语言。
-
-请以JSON格式回复：
+输出格式：
 {
-  "summary": "你的中文概述",
-  "tags": ["标签1", "标签2", "标签3", "标签4", "标签5"],
-  "platforms": ["platform1", "platform2", "platform3"]
+  "summary": "中文概述",
+  "tags": ["标签1", "标签2", "标签3"],
+  "platforms": ["web", "cli"]
 }
+
+平台线索：
+Dockerfile/docker-compose=docker；CLI/命令行/终端=cli；浏览器/前端/API=web；iOS/Swift/Xcode=ios；Android/Kotlin/Gradle=android；macOS/Homebrew=mac；Windows/.exe/MSI=windows；Linux/systemd/apt=linux。
 
 仓库信息：
-${repoInfo}${categoriesInfo}
-
-重点关注实用性和准确的分类，帮助用户快速理解仓库的用途和支持的平台。
+${repoInfo}
       `.trim();
     } else {
+      const categoriesLine = customCategories && customCategories.length > 0
+        ? `\nAvailable categories (tags should prioritize these): ${customCategories.join(', ')}`
+        : '';
       return `
-Please analyze this GitHub repository and provide:
+Please analyze the following GitHub repository information and only output a valid JSON object. Do not output thinking process, Markdown, code block markers, explanations, or any extra text.
 
-1. A concise English overview (no more than 50 words) explaining the main functionality and purpose of this repository
-2. 3-5 relevant application type tags (in English, similar to app store categories, such as: development tools, web apps, mobile apps, database, AI tools, etc.${customCategories ? ', please prioritize from the provided categories' : ''})
-3. Supported platform types (choose from: mac, windows, linux, ios, android, docker, web, cli)
+Requirements:
+- summary: A concise English overview explaining the main functionality and purpose, no more than 50 words.
+- tags: 3-5 English application type tags${customCategories && customCategories.length > 0 ? ', please prioritize from the available categories above' : ', similar to app store categories such as: development tools, web apps, mobile apps, database, AI tools, etc.'}.${categoriesLine}
+- platforms: Must only choose from ["mac","windows","linux","ios","android","docker","web","cli"]; use [] if unable to determine.
 
-Important: Please strictly use English for analysis and response, regardless of the original README language.
-
-Please reply in JSON format:
+Output format:
 {
-  "summary": "Your English overview",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "platforms": ["platform1", "platform2", "platform3"]
+  "summary": "English overview",
+  "tags": ["tag1", "tag2", "tag3"],
+  "platforms": ["web", "cli"]
 }
 
-Repository information:
-${repoInfo}${categoriesInfo}
+Platform hints:
+Dockerfile/docker-compose=docker; CLI/command-line/terminal=cli; browser/frontend/API=web; iOS/Swift/Xcode=ios; Android/Kotlin/Gradle=android; macOS/Homebrew=mac; Windows/.exe/MSI=windows; Linux/systemd/apt=linux.
 
-Focus on practicality and accurate categorization to help users quickly understand the repository's purpose and supported platforms.
+Repository information:
+${repoInfo}
       `.trim();
     }
   }
+
+  private static readonly VALID_PLATFORMS = ['mac', 'windows', 'linux', 'ios', 'android', 'docker', 'web', 'cli'];
 
   private parseAIResponse(content: string): { summary: string; tags: string[]; platforms: string[] } {
     try {
@@ -442,7 +500,16 @@ Focus on practicality and accurate categorization to help users quickly understa
             ? parsed.summary.trim()
             : (this.language === 'zh' ? '无法生成概述' : 'Unable to generate summary'),
           tags: Array.isArray(parsed.tags) ? parsed.tags.filter((v) => typeof v === 'string').slice(0, 5) : [],
-          platforms: Array.isArray(parsed.platforms) ? parsed.platforms.filter((v) => typeof v === 'string').slice(0, 8) : [],
+          platforms: Array.isArray(parsed.platforms)
+            ? Array.from(
+                new Set(
+                  parsed.platforms
+                    .filter((v): v is string => typeof v === 'string')
+                    .map((v) => v.trim().toLowerCase())
+                    .filter((v) => AIService.VALID_PLATFORMS.includes(v))
+                )
+              ).slice(0, 8)
+            : [],
         };
       }
 
@@ -452,7 +519,7 @@ Focus on practicality and accurate categorization to help users quickly understa
         platforms: [],
       };
     } catch (error) {
-      console.error('Failed to parse AI response:', error);
+      logger.errorFromError('ai', 'Failed to parse AI response', error);
       return {
         summary: this.language === 'zh' ? '分析失败' : 'Analysis failed',
         tags: [],
@@ -634,6 +701,7 @@ Focus on practicality and accurate categorization to help users quickly understa
   }
 
   async searchRepositories(repositories: Repository[], query: string): Promise<Repository[]> {
+    const startTime = Date.now();
     if (!query.trim()) return repositories;
 
     try {
@@ -656,7 +724,7 @@ Focus on practicality and accurate categorization to help users quickly understa
         return this.performEnhancedSearch(repositories, query, searchTerms);
       }
     } catch (error) {
-      console.warn('AI search failed, falling back to basic search:', error);
+      logger.warn('ai', 'AI search failed, falling back to basic search', { configId: this.config.id, durationMs: Date.now() - startTime });
     }
 
     // Fallback to basic search
@@ -674,11 +742,12 @@ Focus on practicality and accurate categorization to help users quickly understa
    * @returns Filtered and ranked repositories matching the query
    */
   async searchRepositoriesWithReranking(repositories: Repository[], query: string): Promise<Repository[]> {
-    console.log('🤖 AI Service: Starting enhanced search for:', query);
+    const startTime = Date.now();
+    logger.info('ai', 'Starting enhanced search', { query });
     if (!query.trim()) return repositories;
 
     try {
-      console.log('🚀 AI Service: Calling configured AI service for semantic search');
+      logger.info('ai', 'Calling configured AI service for semantic search', { apiType: this.getApiType(), model: this.config.model, configId: this.config.id });
       const searchPrompt = this.createSearchPrompt(query);
       const system = this.language === 'zh'
         ? '你是一个智能搜索助手。请分析用户的搜索意图，提取关键词并提供多语言翻译。'
@@ -694,16 +763,16 @@ Focus on practicality and accurate categorization to help users quickly understa
       if (content) {
         const searchTerms = this.parseSearchResponse(content);
         const results = this.performEnhancedSearch(repositories, query, searchTerms);
-        console.log('✨ AI Service: AI semantic search completed, results:', results.length);
+        logger.info('ai', 'AI semantic search completed', { resultCount: results.length, apiType: this.getApiType(), model: this.config.model, durationMs: Date.now() - startTime });
         return results;
       }
-    } catch (error) {
-      console.warn('❌ AI Service: AI semantic search failed, falling back to enhanced basic search:', error);
+    } catch {
+      logger.warn('ai', 'AI semantic search failed, falling back to enhanced basic search', { apiType: this.getApiType(), model: this.config.model, configId: this.config.id, durationMs: Date.now() - startTime });
     }
 
-    console.log('🔄 AI Service: Using enhanced basic search with intelligent ranking');
+    logger.info('ai', 'Using enhanced basic search with intelligent ranking');
     const fallbackResults = this.performEnhancedBasicSearch(repositories, query);
-    console.log('✨ AI Service: Enhanced search completed, results:', fallbackResults.length);
+    logger.info('ai', 'Enhanced search completed', { resultCount: fallbackResults.length });
 
     return fallbackResults;
   }
@@ -828,7 +897,7 @@ Reply in JSON format:
         return allTerms.filter(term => typeof term === 'string' && term.length > 0);
       }
     } catch (error) {
-      console.warn('Failed to parse AI search response:', error);
+      logger.warn('ai', 'Failed to parse AI search response', { error: String(error) });
     }
     return [];
   }

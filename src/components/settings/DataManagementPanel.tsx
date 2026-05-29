@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Trash2,
   AlertTriangle,
@@ -24,6 +24,8 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { indexedDBStorage } from '../../services/indexedDbStorage';
+import { backend } from '../../services/backendAdapter';
+import { version as appVersion } from '../../../package.json';
 import type { 
   Repository, 
   Release, 
@@ -162,6 +164,8 @@ export const DataManagementPanel: React.FC<DataManagementPanelProps> = ({ t }) =
     };
     setOperationLogs((prev) => [newLog, ...prev].slice(0, 50));
   }, []);
+
+  const backendAvailable = backend.isAvailable;
 
   const showSuccess = useCallback((message: string) => {
     setShowSuccessMessage(message);
