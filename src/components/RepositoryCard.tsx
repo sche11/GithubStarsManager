@@ -13,6 +13,7 @@ import { ReadmeModal } from './ReadmeModal';
 import { FloatingTooltip } from './FloatingTooltip';
 import { shallow } from 'zustand/shallow';
 import { useDialog } from '../hooks/useDialog';
+import { logger } from '../services/logger';
 
 // Selection-aware button component to centralize selectionMode disable logic
 interface SelectionAwareButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -89,13 +90,18 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
   allCategories
 }) => {
   const repoId = repository.id;
-  
+
+  const isSubscribed = useAppStore(
+    useCallback((state) => state.releaseSubscriptions.has(repoId), [repoId])
+  );
+  const isStoreAnalyzing = useAppStore(
+    useCallback((state) => state.analyzingRepositoryIds.has(repoId), [repoId])
+  );
+
   const {
-    isSubscribed,
     toggleReleaseSubscription,
     githubToken,
     activeAIConfig,
-    analyzingRepositoryIds,
     setAnalyzingRepository,
     language,
     updateRepository,
@@ -103,11 +109,9 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
   } = useAppStore(
     useCallback(
       (state) => ({
-        isSubscribed: state.releaseSubscriptions.has(repoId),
         toggleReleaseSubscription: state.toggleReleaseSubscription,
         githubToken: state.githubToken,
         activeAIConfig: state.activeAIConfig,
-        analyzingRepositoryIds: state.analyzingRepositoryIds,
         setAnalyzingRepository: state.setAnalyzingRepository,
         language: state.language,
         updateRepository: state.updateRepository,
@@ -117,8 +121,6 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
     ),
     shallow
   );
-
-  const isAnalyzing = analyzingRepositoryIds.has(repoId);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -141,6 +143,8 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
   const [unstarring, setUnstarring] = useState(false);
   const [showDragHint, setShowDragHint] = useState(false);
   const dragHintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isLocallyAnalyzing, setIsLocallyAnalyzing] = useState(false);
+  const isAnalyzing = isLocallyAnalyzing || isStoreAnalyzing;
 
   // 高亮搜索关键词的工具函数 - 使用缓存优化
   const highlightSearchTerm = useCallback((text: string, searchTerm: string): React.ReactNode => {
@@ -295,6 +299,15 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    const analysisStartedAt = performance.now();
+    setIsLocallyAnalyzing(true);
+    requestAnimationFrame(() => {
+      logger.info('ai.performance', 'Repository card AI spinner painted', {
+        repoId,
+        fullName: repository.full_name,
+        elapsedMs: Math.round(performance.now() - analysisStartedAt),
+      });
+    });
     setAnalyzingRepository(repoId, true);
     try {
       const result = await analyzeRepository({
@@ -303,7 +316,20 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
         aiConfig: activeConfig,
         language,
         categories: allCategories,
+        onProgress: (status) => {
+          logger.info('ai.performance', 'Repository card AI analysis step', {
+            repoId,
+            fullName: repository.full_name,
+            status,
+            elapsedMs: Math.round(performance.now() - analysisStartedAt),
+          });
+        },
         signal: controller.signal,
+      });
+      logger.info('ai.performance', 'Repository card AI request completed', {
+        repoId,
+        fullName: repository.full_name,
+        elapsedMs: Math.round(performance.now() - analysisStartedAt),
       });
 
       if (controller.signal.aborted) return;
@@ -320,7 +346,14 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
         analysis_error: undefined,
       };
 
+      const updateStartedAt = performance.now();
       updateRepository(updatedRepo);
+      logger.info('ai.performance', 'Repository card AI result stored', {
+        repoId,
+        fullName: repository.full_name,
+        updateMs: Math.round(performance.now() - updateStartedAt),
+        elapsedMs: Math.round(performance.now() - analysisStartedAt),
+      });
 
       const successMessage = repository.analyzed_at
         ? (language === 'zh' ? 'AI重新分析完成！' : 'AI re-analysis completed!')
@@ -342,11 +375,19 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
           analysis_error: failedResult.analysis_error,
         };
 
+        const updateStartedAt = performance.now();
         updateRepository(failedRepo);
+        logger.info('ai.performance', 'Repository card AI failure stored', {
+          repoId,
+          fullName: repository.full_name,
+          updateMs: Math.round(performance.now() - updateStartedAt),
+          elapsedMs: Math.round(performance.now() - analysisStartedAt),
+        });
 
         toast(language === 'zh' ? 'AI分析失败，请检查AI配置和网络连接。' : 'AI analysis failed. Please check AI configuration and network connection.', 'error');
       }
     } finally {
+      setIsLocallyAnalyzing(false);
       if (!controller.signal.aborted) {
         setAnalyzingRepository(repoId, false);
       }
@@ -645,6 +686,14 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
   // 使用 ref 来跟踪是否已经处理了点击
   const isProcessingClickRef = useRef(false);
 
+  const hideDescriptionTooltip = useCallback(() => {
+    if (tooltipHideTimerRef.current) {
+      clearTimeout(tooltipHideTimerRef.current);
+      tooltipHideTimerRef.current = null;
+    }
+    setShowTooltip(false);
+  }, []);
+
   // 使用 useCallback 优化事件处理函数
   const handleCardClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     // 防止重复处理
@@ -685,9 +734,10 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
       return;
     }
 
-    // 打开 README 模态框
+    // 打开 README 模态框前隐藏描述悬浮提示，避免遮挡预览层
+    hideDescriptionTooltip();
     setReadmeModalOpen(true);
-  }, [selectionMode, onSelect, repository.id]);
+  }, [selectionMode, onSelect, repository.id, hideDescriptionTooltip]);
 
   // 处理鼠标按下事件，阻止焦点变化导致页面滚动
   const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -708,12 +758,14 @@ const RepositoryCardComponent: React.FC<RepositoryCardProps> = ({
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       if (selectionMode && onSelect) {
+        hideDescriptionTooltip();
         onSelect(repository.id);
       } else {
+        hideDescriptionTooltip();
         setReadmeModalOpen(true);
       }
     }
-  }, [selectionMode, onSelect, repository.id, isModalOpen]);
+  }, [selectionMode, onSelect, repository.id, isModalOpen, hideDescriptionTooltip]);
 
   // 使用 useMemo 缓存卡片类名，避免重复计算
   const cardClassName = useMemo(() => {
