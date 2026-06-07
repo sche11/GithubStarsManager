@@ -64,6 +64,14 @@ export interface Release {
 }
 
 // Fork types
+export interface GitHubOrganization {
+  id: number;
+  login: string;
+  avatar_url: string;
+  description: string | null;
+  html_url: string;
+}
+
 export interface ForkRepo {
   id: number;
   name: string;
@@ -290,6 +298,9 @@ export interface AppState {
   releaseExpandedRepositories: Set<number>;
   releaseIsRefreshing: boolean;
   includePreRelease: boolean;  // whether to include pre-release in refresh
+
+  // Backup/Export key inclusion preference
+  includeKeysInBackup: boolean;
 
   // Discovery
   discoveryChannels: DiscoveryChannel[];
