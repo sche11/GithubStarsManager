@@ -17,6 +17,7 @@ import {
   EmbeddingClient,
   VectorSearchService,
   indexAllRepos,
+  EMBEDDING_FORMAT_VERSION,
 } from '../../services/vectorSearchService';
 import { GitHubApiService } from '../../services/githubApi';
 import type { EmbeddingApiType, EmbeddingConfig } from '../../types';
@@ -58,6 +59,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
     setVectorIndexingState,
     repositories,
     githubToken,
+    updateRepositoriesMetadata,
   } = useAppStore();
 
   // Local form state for embedding config
@@ -77,6 +79,12 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
   // Index mode state
   const [formIndexMode, setFormIndexMode] = useState<'description' | 'readme'>(vectorSearchConfig.indexMode || 'readme');
   const [formReadmeMaxChars, setFormReadmeMaxChars] = useState(vectorSearchConfig.readmeMaxChars || 6000);
+
+  // Search parameters state
+  const [formSearchThreshold, setFormSearchThreshold] = useState(vectorSearchConfig.searchThreshold ?? 0.35);
+  const [formSearchTopK, setFormSearchTopK] = useState(vectorSearchConfig.searchTopK ?? 30);
+  const [formEnableHyDE, setFormEnableHyDE] = useState(vectorSearchConfig.enableHyDE ?? true);
+  const [formEnableReranking, setFormEnableReranking] = useState(vectorSearchConfig.enableReranking ?? true);
 
   // Test state
   const [testingEmbedding, setTestingEmbedding] = useState(false);
@@ -144,10 +152,15 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
       embeddingConfigId: activeEmbeddingConfig || '',
       indexMode: formIndexMode,
       readmeMaxChars: formReadmeMaxChars,
+      searchThreshold: formSearchThreshold,
+      searchTopK: formSearchTopK,
+      enableHyDE: formEnableHyDE,
+      enableReranking: formEnableReranking,
+      embeddingFormatVersion: EMBEDDING_FORMAT_VERSION,
     });
     setWorkerSaved(true);
     setTimeout(() => setWorkerSaved(false), 2000);
-  }, [formWorkerUrl, formAuthToken, formIndexMode, formReadmeMaxChars, activeEmbeddingConfig, setVectorSearchConfig]);
+  }, [formWorkerUrl, formAuthToken, formIndexMode, formReadmeMaxChars, formSearchThreshold, formSearchTopK, formEnableHyDE, formEnableReranking, activeEmbeddingConfig, setVectorSearchConfig]);
 
   const handleTestEmbedding = useCallback(async () => {
     setTestingEmbedding(true);
@@ -208,9 +221,22 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
     }
   }, [formWorkerUrl, formAuthToken, setVectorSearchStatus]);
 
-  const runIndexAll = useCallback(async (withCleanup: boolean) => {
-    if (!activeConfig) return;
+  // 未索引数量（已分析、未失败、未向量索引或内容已更新）
+  const unindexedCount = repositories.filter((r) => {
+    if (!r.analyzed_at || r.analysis_failed) return false;
+    if (!r.vector_indexed_at) return true;
+    const contentTime = [r.last_edited, r.analyzed_at]
+      .filter((t): t is string => !!t)
+      .sort()
+      .pop() || '';
+    return contentTime > r.vector_indexed_at;
+  }).length;
 
+  // 嵌入文本格式版本升级时，即使无内容更新也需要触发增量索引来重建所有向量
+  const formatVersionNeedsReindex = (vectorSearchConfig.embeddingFormatVersion ?? 1) < EMBEDDING_FORMAT_VERSION;
+
+  const createClients = useCallback(() => {
+    if (!activeConfig) return null;
     const embeddingClient = new EmbeddingClient({
       ...activeConfig,
       apiType: formApiType,
@@ -225,39 +251,70 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
       authToken: formAuthToken,
       embeddingConfigId: activeEmbeddingConfig || '',
     });
+    // 复用单个 GitHubApiService 实例，保留 rate-limit state
+    const githubApi = githubToken ? new GitHubApiService(githubToken) : null;
+    const readmeFetcher = githubApi
+      ? (owner: string, repo: string, signal?: AbortSignal) =>
+          githubApi.getRepositoryReadme(owner, repo, signal)
+      : undefined;
+    return { embeddingClient, vectorService, readmeFetcher };
+  }, [activeConfig, formApiType, formBaseUrl, formApiKey, formModel, formDimensions, formWorkerUrl, formAuthToken, activeEmbeddingConfig, githubToken]);
+
+  const handleRebuildIndex = useCallback(async () => {
+    const clients = createClients();
+    if (!clients) return;
+
     const controller = new AbortController();
     setAbortController(controller);
     setVectorIndexingState({ isIndexing: true, phase: null, phaseDone: 0, phaseTotal: 0, result: null });
 
     try {
-      if (withCleanup) {
-        const keepIds = repositories.map(r => String(r.id));
-        try {
-          await vectorService.cleanup(keepIds, controller.signal);
-        } catch (cleanupErr) {
-          // Cleanup 失败不阻塞重建，记录警告继续
-          console.warn('Vector cleanup failed, continuing with rebuild:', cleanupErr);
-        }
-      }
+      // 每次点击时读取最新的 repositories，避免闭包捕获过期数据
+      const currentRepos = useAppStore.getState().repositories;
 
-      const readmeFetcher = githubToken
-        ? (owner: string, repo: string, signal?: AbortSignal) => {
-            const api = new GitHubApiService(githubToken);
-            return api.getRepositoryReadme(owner, repo, signal);
-          }
-        : undefined;
+      // 1. 清除所有 vector_indexed_at（包括之前失败/不可索引的 repo 的残留值）
+      //    用 updateRepositoriesMetadata 避免重置当前过滤的 searchResults
+      updateRepositoriesMetadata(
+        currentRepos.filter(r => r.vector_indexed_at).map(r => ({ id: r.id, patch: { vector_indexed_at: undefined } }))
+      );
 
-      const result = await indexAllRepos(repositories, embeddingClient, vectorService, {
+      // 2. 全量索引，逐批确认后立即 stamp（中断不丢失已确认进度）
+      const now = new Date().toISOString();
+      const stampedRepoIds: number[] = [];
+      const result = await indexAllRepos(currentRepos, clients.embeddingClient, clients.vectorService, {
         onProgress: (progress) => setVectorIndexingState({
           phase: progress.phase,
           phaseDone: progress.done,
           phaseTotal: progress.total,
         }),
         signal: controller.signal,
-        readmeFetcher,
+        readmeFetcher: clients.readmeFetcher,
         indexMode: formIndexMode,
         readmeMaxChars: formReadmeMaxChars,
+        incremental: false,
+        onRepoIndexed: (repoId) => {
+          stampedRepoIds.push(repoId);
+          // 批量 stamp：每 32 个（一个 batch）刷新一次，减少 UI 刷新频率
+          if (stampedRepoIds.length % 32 === 0) {
+            const batch = stampedRepoIds.splice(0, stampedRepoIds.length);
+            updateRepositoriesMetadata(batch.map(id => ({ id, patch: { vector_indexed_at: now } })));
+          }
+        },
       });
+
+      // stamp 剩余未刷新的
+      if (stampedRepoIds.length > 0) {
+        updateRepositoriesMetadata(stampedRepoIds.map(id => ({ id, patch: { vector_indexed_at: now } })));
+      }
+
+      // 3. cleanup：全量重建后只保留本次成功重建的向量
+      try {
+        await clients.vectorService.cleanup(result.indexedRepoIds.map(String), controller.signal);
+      } catch (cleanupErr) {
+        console.warn('Vector cleanup failed after rebuild:', cleanupErr);
+        throw cleanupErr;
+      }
+
       setVectorIndexingState({ result, isIndexing: false, phase: null });
       setVectorSearchStatus({
         connected: true,
@@ -265,19 +322,112 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         dimensions: formDimensions,
         lastSyncAt: new Date().toISOString(),
       });
+      // 索引成功后更新格式版本号，避免下次增量索引重复触发全量重建
+      setVectorSearchConfig({ embeddingFormatVersion: EMBEDDING_FORMAT_VERSION });
     } catch (err) {
       if (err instanceof Error && err.message === 'Aborted') {
         setVectorIndexingState({ isIndexing: false, phase: null, result: null });
       } else {
-        setVectorIndexingState({ isIndexing: false, phase: null, result: { indexed: 0, skipped: 0, errors: repositories.length } });
+        const msg = err instanceof Error ? err.message : String(err);
+        const currentRepos = useAppStore.getState().repositories;
+        const indexableCount = currentRepos.filter((r) => r.analyzed_at && !r.analysis_failed).length;
+        setVectorIndexingState({ isIndexing: false, phase: null, result: { indexed: 0, skipped: currentRepos.length - indexableCount, errors: indexableCount, error: msg } });
       }
     } finally {
       setAbortController(null);
     }
-  }, [activeConfig, formApiType, formBaseUrl, formApiKey, formModel, formDimensions, formWorkerUrl, formAuthToken, formIndexMode, formReadmeMaxChars, activeEmbeddingConfig, repositories, githubToken, setVectorSearchStatus, setVectorIndexingState]);
+  }, [createClients, formIndexMode, formReadmeMaxChars, formDimensions, updateRepositoriesMetadata, setVectorSearchStatus, setVectorIndexingState, vectorSearchConfig.embeddingFormatVersion, setVectorSearchConfig]);
 
-  const handleRebuildIndex = useCallback(() => runIndexAll(true), [runIndexAll]);
-  const handleIncrementalIndex = useCallback(() => runIndexAll(false), [runIndexAll]);
+  const handleIncrementalIndex = useCallback(async () => {
+    const clients = createClients();
+    if (!clients) return;
+
+    const controller = new AbortController();
+    setAbortController(controller);
+    setVectorIndexingState({ isIndexing: true, phase: null, phaseDone: 0, phaseTotal: 0, result: null });
+
+    try {
+      // 每次点击时读取最新的 repositories，避免闭包捕获过期数据
+      const currentRepos = useAppStore.getState().repositories;
+
+      // 记录索引前无 vector_indexed_at 的 repo，用于精确计算新增数量
+      const newlyIndexedRepoIds = new Set(
+        currentRepos.filter(r => !r.vector_indexed_at).map(r => r.id)
+      );
+
+      const now = new Date().toISOString();
+      const stampedRepoIds: number[] = [];
+      const result = await indexAllRepos(currentRepos, clients.embeddingClient, clients.vectorService, {
+        onProgress: (progress) => setVectorIndexingState({
+          phase: progress.phase,
+          phaseDone: progress.done,
+          phaseTotal: progress.total,
+        }),
+        signal: controller.signal,
+        readmeFetcher: clients.readmeFetcher,
+        indexMode: formIndexMode,
+        readmeMaxChars: formReadmeMaxChars,
+        incremental: true,
+        formatVersion: vectorSearchConfig.embeddingFormatVersion,
+        currentFormatVersion: EMBEDDING_FORMAT_VERSION,
+        onRepoIndexed: (repoId) => {
+          stampedRepoIds.push(repoId);
+          if (stampedRepoIds.length % 32 === 0) {
+            const batch = stampedRepoIds.splice(0, stampedRepoIds.length);
+            updateRepositoriesMetadata(batch.map(id => ({ id, patch: { vector_indexed_at: now } })));
+          }
+        },
+      });
+
+      // stamp 剩余未刷新的
+      if (stampedRepoIds.length > 0) {
+        updateRepositoriesMetadata(stampedRepoIds.map(id => ({ id, patch: { vector_indexed_at: now } })));
+      }
+
+      setVectorIndexingState({ result, isIndexing: false, phase: null });
+      // 只计算本次新增索引的 repo（之前无 vector_indexed_at），不包含重新索引的
+      // 用可选链避免 vectorSearchStatus 为 undefined 时抛错（旧版本持久化状态或未测试连接）
+      const newlyIndexedCount = result.indexedRepoIds.filter(id => newlyIndexedRepoIds.has(id)).length;
+      const prevCount = useAppStore.getState().vectorSearchStatus?.vectorCount ?? 0;
+      try {
+        setVectorSearchStatus({
+          connected: true,
+          vectorCount: prevCount + newlyIndexedCount,
+          dimensions: formDimensions,
+          lastSyncAt: new Date().toISOString(),
+        });
+      } catch (statusErr) {
+        // 状态更新失败不应回滚已成功的索引结果
+        console.warn('Failed to update vector search status:', statusErr);
+      }
+      // 索引成功后更新格式版本号，避免下次增量索引重复触发全量重建
+      setVectorSearchConfig({ embeddingFormatVersion: EMBEDDING_FORMAT_VERSION });
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Aborted') {
+        setVectorIndexingState({ isIndexing: false, phase: null, result: null });
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        const currentRepos = useAppStore.getState().repositories;
+        const attemptedCount = currentRepos.filter((r) => {
+          if (!r.analyzed_at || r.analysis_failed) return false;
+          if (!r.vector_indexed_at) return true;
+          const contentTime = [r.last_edited, r.analyzed_at]
+            .filter((t): t is string => !!t)
+            .sort()
+            .pop() || '';
+          return contentTime > r.vector_indexed_at;
+        }).length;
+        const skippedCount = currentRepos.length - attemptedCount;
+        setVectorIndexingState({
+          isIndexing: false,
+          phase: null,
+          result: { indexed: 0, skipped: skippedCount, errors: attemptedCount, error: msg },
+        });
+      }
+    } finally {
+      setAbortController(null);
+    }
+  }, [createClients, formIndexMode, formReadmeMaxChars, formDimensions, updateRepositoriesMetadata, setVectorSearchStatus, setVectorIndexingState, vectorSearchConfig.embeddingFormatVersion, setVectorSearchConfig]);
 
   const handleAbortIndexing = useCallback(() => {
     abortController?.abort();
@@ -735,16 +885,21 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
           </button>
           <button
             onClick={handleIncrementalIndex}
-            disabled={isIndexing || !isConfigComplete}
-            className="flex items-center gap-2 px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isIndexing || !isConfigComplete || (unindexedCount === 0 && !formatVersionNeedsReindex)}
+            className="flex items-center gap-2 px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isIndexing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             {t('增量索引', 'Incremental Index')}
+            {unindexedCount > 0 && (
+              <span className="ml-1 px-2 py-0.5 text-xs bg-brand-indigo text-white rounded-full">
+                {unindexedCount}
+              </span>
+            )}
           </button>
           {isIndexing && (
             <button
               onClick={handleAbortIndexing}
-              className="flex items-center gap-2 px-4 py-2 text-sm bg-red-500 text-white rounded-md hover:bg-red-600"
+              className="flex items-center gap-2 px-4 py-2 text-sm bg-red-500 text-white rounded-lg hover:bg-red-600"
             >
               <Square className="w-4 h-4" />
               {t('中止', 'Abort')}
@@ -768,7 +923,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
             </div>
             <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
               <div
-                className="bg-purple-500 h-2 rounded-full transition-all"
+                className="bg-brand-indigo h-2 rounded-full transition-all"
                 style={{ width: `${(phaseDone / phaseTotal) * 100}%` }}
               />
             </div>
@@ -790,10 +945,128 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         )}
       </div>
 
-      {/* Section 5: Delete Index */}
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
+      {/* Section 5: Search Parameters */}
+      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
         <h3 className="font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2">
           <span className="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-0.5 rounded">⑤</span>
+          {t('搜索参数', 'Search Parameters')}
+        </h3>
+
+        {/* Similarity Threshold */}
+        <div className="space-y-1">
+          <label htmlFor="search-threshold" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {t('相似度阈值', 'Similarity Threshold')}
+          </label>
+          <div className="flex items-center gap-3">
+            <input
+              id="search-threshold"
+              type="range"
+              min={0.1}
+              max={0.8}
+              step={0.05}
+              value={formSearchThreshold}
+              onChange={(e) => setFormSearchThreshold(parseFloat(e.target.value))}
+              className="flex-1"
+            />
+            <span className="text-sm font-mono text-gray-600 dark:text-gray-400 w-12 text-right">
+              {formSearchThreshold.toFixed(2)}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {t('越高越严格，结果越少但更精确；越低越宽松，召回更多但可能有噪音', 'Higher = stricter, fewer but more precise results; Lower = more recall but may include noise')}
+          </p>
+        </div>
+
+        {/* Top K */}
+        <div className="space-y-1">
+          <label htmlFor="search-topk" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {t('返回结果数 (Top K)', 'Results Count (Top K)')}
+          </label>
+          <input
+            id="search-topk"
+            type="number"
+            value={formSearchTopK}
+            onChange={(e) => setFormSearchTopK(Math.max(5, Math.min(50, parseInt(e.target.value) || 30)))}
+            min={5}
+            max={50}
+            className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-brand-indigo focus:border-transparent"
+          />
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {t('向量检索返回的最大结果数，越多召回越广但 LLM 重排序成本越高', 'Max results from vector search. More = wider recall but higher LLM reranking cost')}
+          </p>
+        </div>
+
+        {/* HyDE Toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {t('HyDE 查询预处理', 'HyDE Query Preprocessing')}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {t('让 AI 生成理想仓库描述再搜索，提升短查询和中文查询的召回率', 'AI generates ideal repo description before searching, improves recall for short/Chinese queries')}
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={formEnableHyDE}
+            aria-label={t('HyDE 查询预处理', 'HyDE Query Preprocessing')}
+            onClick={() => setFormEnableHyDE(!formEnableHyDE)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              formEnableHyDE ? 'bg-brand-indigo' : 'bg-gray-300 dark:bg-gray-600'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                formEnableHyDE ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Reranking Toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {t('LLM 语义重排序', 'LLM Semantic Reranking')}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {t('用 LLM 对向量搜索结果做语义排序，显著提升排序质量', 'LLM reranks vector results by semantic relevance, significantly improves ranking quality')}
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={formEnableReranking}
+            aria-label={t('LLM 语义重排序', 'LLM Semantic Reranking')}
+            onClick={() => setFormEnableReranking(!formEnableReranking)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              formEnableReranking ? 'bg-brand-indigo' : 'bg-gray-300 dark:bg-gray-600'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                formEnableReranking ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Save */}
+        <button
+          onClick={handleSaveWorkerConfig}
+          className={`px-4 py-2 text-sm rounded-lg transition-colors ${
+            workerSaved
+              ? 'bg-green-500 text-white'
+              : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
+          }`}
+        >
+          {workerSaved ? `✓ ${t('已保存', 'Saved')}` : t('保存搜索参数', 'Save Search Parameters')}
+        </button>
+      </div>
+
+      {/* Section 6: Delete Index */}
+      <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
+        <h3 className="font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2">
+          <span className="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-0.5 rounded">⑥</span>
           {t('删除索引', 'Delete Index')}
         </h3>
         <p className="text-sm text-gray-500 dark:text-gray-400">
@@ -827,14 +1100,14 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         </p>
       </div>
 
-      {/* Section 6: Deploy Guide */}
+      {/* Section 7: Deploy Guide */}
       <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
         <button
           onClick={() => setShowDeployGuide(!showDeployGuide)}
           className="w-full flex items-center justify-between p-4 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
         >
           <h3 className="font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2">
-            <span className="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-0.5 rounded">⑥</span>
+            <span className="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-0.5 rounded">⑦</span>
             {t('部署指南', 'Deploy Guide')}
           </h3>
           {showDeployGuide ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
