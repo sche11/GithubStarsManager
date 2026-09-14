@@ -17,8 +17,6 @@ import configsRouter from './routes/configs.js';
 import syncRouter from './routes/sync.js';
 import authRestoreRouter from './routes/authRestore.js';
 import proxyRouter from './routes/proxy.js';
-import xtweetRouter from './routes/xtweet.js';
-import telegramRouter from './routes/telegram.js';
 import logsRouter from './routes/logs.js';
 import mcpAdminRouter from './routes/mcp.js';
 import { mountMcpRoutes } from './mcp/http.js';
@@ -68,9 +66,10 @@ export function createApp(): express.Express {
   app.use(authRestoreRouter);
 
   // Wave 3: Proxy routes
+  // GitHub / Telegram / X / AI 的出网路由已迁至 Vercel Functions
+  // （src/../api/ 目录）：本容器出口在阿里云华北 2，到这些目标的
+  // 可达性不稳定。此处仅保留不需出网的数据面代理（WebDAV / RPC 下载）。
   app.use(proxyRouter);
-  app.use(xtweetRouter);
-  app.use(telegramRouter);
 
   // Wave 4: Logs route
   app.use(logsRouter);
