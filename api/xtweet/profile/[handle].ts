@@ -10,14 +10,14 @@
  */
 
 import type { ServerResponse } from 'node:http';
-import { BROWSER_UA, guardSameOrigin, sendError, sendJson } from '../../_lib/egress';
+import { BROWSER_UA, guardSameOrigin, sendError, sendJson } from '../../_lib/egress.js';
 import {
   FETCH_TIMEOUT_MS,
   X_HANDLE_PATTERN,
   respondToFetchError,
   singleQuery,
   type EgressRequest,
-} from '../_shared';
+} from '../_shared.js';
 
 export default async function handler(
   req: EgressRequest,

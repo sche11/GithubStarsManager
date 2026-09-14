@@ -23,7 +23,7 @@ import {
   readJsonBody,
   sendError,
   sendJson,
-} from '../_lib/egress';
+} from '../_lib/egress.js';
 import {
   FETCH_TIMEOUT_MS,
   X_COOKIE_VALUE_PATTERN,
@@ -32,7 +32,7 @@ import {
   isAllowedXProxyUrl,
   respondToFetchError,
   type EgressRequest,
-} from './_shared';
+} from './_shared.js';
 
 /** 请求体形状，字段名沿用原 Express 版。 */
 interface XGraphQLBody {

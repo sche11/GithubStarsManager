@@ -17,7 +17,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { BROWSER_UA, guardSameOrigin, sendError, sendJson } from '../../_lib/egress';
+import { BROWSER_UA, guardSameOrigin, sendError, sendJson } from '../../_lib/egress.js';
 
 /** 频道名白名单：与原 Express 实现逐字一致。 */
 const TG_CHANNEL_PATTERN = /^[A-Za-z0-9_]{3,64}$/;

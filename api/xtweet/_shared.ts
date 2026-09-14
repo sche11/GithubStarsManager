@@ -7,7 +7,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { sendError } from '../_lib/egress';
+import { sendError } from '../_lib/egress.js';
 
 /** 句柄白名单：与原 Express 实现逐字一致。 */
 export const X_HANDLE_PATTERN = /^[A-Za-z0-9_]{1,15}$/;

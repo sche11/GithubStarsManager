@@ -16,7 +16,7 @@ import {
   guardSameOrigin,
   readJsonBody,
   sendError,
-} from '../_lib/egress';
+} from '../_lib/egress.js';
 
 /** raw 内容主机白名单，与原 Express 实现逐字一致。 */
 const ALLOWED_RAW_HOSTS = new Set(['gist.githubusercontent.com', 'raw.githubusercontent.com']);

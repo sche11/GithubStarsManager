@@ -25,7 +25,7 @@ import {
   guardSameOrigin,
   readJsonBody,
   sendError,
-} from '../_lib/egress';
+} from '../_lib/egress.js';
 
 /** 推理模型（openai-responses 或带 reasoning）需要更长超时。 */
 const AI_TIMEOUT_MS = 290_000;
