@@ -1,5 +1,6 @@
 import { translateBackendError } from '../utils/backendErrors';
 import { normalizeBackendUrl } from '../utils/backendUrl';
+import { getEgressBaseUrl, getEgressHeaders } from './egressAdapter';
 import { logger } from './logger';
 
 import { Repository, Release, AIConfig, WebDAVConfig, EmbeddingConfig, VectorSearchConfig } from '../types';
@@ -38,6 +39,22 @@ export const getBackendAuthHeaders = (): Record<string, string> => {
     headers['Authorization'] = `Bearer ${secret}`;
   }
   return headers;
+};
+
+/**
+ * 读取当前会话的 GitHub token。
+ *
+ * egress 层（Vercel Function）无数据库访问能力，无法像魔搭侧那样从 SQLite
+ * 读取 `settings.github_token`；因此所有经 egress 代发的 GitHub 请求都必须
+ * 由前端携带该 token。token 本就存于 store（登录时写入），此处不额外引入
+ * 获取路径。
+ */
+const getSessionGithubToken = (): string => {
+  try {
+    return useAppStore.getState().githubToken || '';
+  } catch {
+    return '';
+  }
 };
 
 const readStoredBackendUrl = (): string | null => {
@@ -312,17 +329,23 @@ class BackendAdapter {
     throw error;
   }
 
-  // === GitHub Proxy ===
+  // === GitHub Proxy（经 egress 层代发，非数据后端） ===
+  //
+  // 以下方法全部发往 `api/proxy/github*`（Vercel Function）。之所以不用
+  // `this._backendUrl`（魔搭）：魔搭出口在阿里云华北 2，到 api.github.com 的
+  // 可达性不稳定。egress 层无数据库，因此 token 必须随请求携带。
 
   async fetchStarredRepos(page = 1, perPage = 100): Promise<Repository[]> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/user/starred?page=${page}&per_page=${perPage}&sort=updated`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/user/starred?page=${page}&per_page=${perPage}&sort=updated`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
+      headers: getEgressHeaders(),
       body: JSON.stringify({
         method: 'GET',
-        headers: { 'Accept': 'application/vnd.github.star+json' }
+        headers: { 'Accept': 'application/vnd.github.star+json' },
+        githubToken: getSessionGithubToken(),
       })
     });
     if (!res.ok) await this.throwTranslatedError(res, 'Backend proxy error');
@@ -335,12 +358,13 @@ class BackendAdapter {
   }
 
   async getCurrentUser(): Promise<Record<string, unknown>> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/user`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/user`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ method: 'GET' })
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() })
     });
     if (!res.ok) await this.throwTranslatedError(res, 'Backend proxy error');
     return res.json() as Promise<Record<string, unknown>>;
@@ -360,12 +384,13 @@ class BackendAdapter {
   }
 
   async getRepositoryReadme(owner: string, repo: string, signal?: AbortSignal): Promise<string> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/repos/${owner}/${repo}/readme`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/repos/${owner}/${repo}/readme`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ method: 'GET' }),
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() }),
       signal,
     });
     if (res.status === 404) return '';
@@ -375,13 +400,14 @@ class BackendAdapter {
   }
 
   async listRepositoryReadmeCandidates(owner: string, repo: string, defaultBranch?: string, signal?: AbortSignal): Promise<GitHubReadmeCandidateItem[]> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
     const fetchRootContents = async (): Promise<GitHubReadmeCandidateItem[]> => {
-      const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/repos/${owner}/${repo}/contents`, {
+      const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/repos/${owner}/${repo}/contents`, {
         method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({ method: 'GET' }),
+        headers: getEgressHeaders(),
+        body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() }),
         signal,
       });
       if (!res.ok) return [];
@@ -392,10 +418,10 @@ class BackendAdapter {
     let branch = defaultBranch;
     if (!branch) {
       try {
-        const repoRes = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/repos/${owner}/${repo}`, {
+        const repoRes = await this.fetchWithTimeout(`${egressUrl}/proxy/github/repos/${owner}/${repo}`, {
           method: 'POST',
-          headers: this.getAuthHeaders(),
-          body: JSON.stringify({ method: 'GET' }),
+          headers: getEgressHeaders(),
+          body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() }),
           signal,
         });
         if (repoRes.ok) {
@@ -416,10 +442,10 @@ class BackendAdapter {
     }
 
     try {
-      const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`, {
+      const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`, {
         method: 'POST',
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({ method: 'GET' }),
+        headers: getEgressHeaders(),
+        body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() }),
         signal,
       });
       if (!res.ok) return await fetchRootContents();
@@ -440,12 +466,13 @@ class BackendAdapter {
   }
 
   async getRepositoryReadmeByPath(owner: string, repo: string, path: string, signal?: AbortSignal): Promise<string> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/repos/${owner}/${repo}/contents/${this.encodeContentPath(path)}`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/repos/${owner}/${repo}/contents/${this.encodeContentPath(path)}`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ method: 'GET' }),
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() }),
       signal,
     });
     if (res.status === 404) return '';
@@ -461,12 +488,13 @@ class BackendAdapter {
     perPage = 30,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>[]> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/repos/${owner}/${repo}/releases?page=${page}&per_page=${perPage}`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/repos/${owner}/${repo}/releases?page=${page}&per_page=${perPage}`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ method: 'GET' }),
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() }),
       signal,
     });
     if (!res.ok) await this.throwTranslatedError(res, 'Backend proxy error');
@@ -479,15 +507,17 @@ class BackendAdapter {
   }
 
   async downloadGitHubResource(path: string, signal?: AbortSignal): Promise<Blob> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
     if (!path.startsWith('/repos/')) throw new Error('Invalid GitHub resource path');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github${path}`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github${path}`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
+      headers: getEgressHeaders(),
       body: JSON.stringify({
         method: 'GET',
         headers: { Accept: 'application/octet-stream' },
+        githubToken: getSessionGithubToken(),
       }),
       signal,
     });
@@ -496,26 +526,32 @@ class BackendAdapter {
   }
 
   async checkRateLimit(): Promise<{ remaining: number; reset: number }> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/rate_limit`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/rate_limit`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ method: 'GET' })
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ method: 'GET', githubToken: getSessionGithubToken() })
     });
     if (!res.ok) await this.throwTranslatedError(res, 'Backend proxy error');
     const data = await res.json() as { rate: { remaining: number; reset: number } };
     return { remaining: data.rate.remaining, reset: data.rate.reset };
   }
 
-  // === AI Proxy ===
+  // === AI Proxy（经 egress 层代发，非数据后端） ===
+  //
+  // AI Provider（OpenAI / Claude / Gemini 官方端点）在魔搭出口不可达，故走
+  // Vercel。egress 层无数据库，`configId` 路径必然返回 404 + AI_CONFIG_NOT_FOUND，
+  // `proxyAIRequestWithFallback` 会据此自动改用内联 config 重试。
 
   async proxyAIRequest(configId: string, body: object, signal?: AbortSignal): Promise<unknown> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/ai`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/ai`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
+      headers: getEgressHeaders(),
       body: JSON.stringify({ configId, body }),
       signal,
     }, 120000);
@@ -524,11 +560,12 @@ class BackendAdapter {
   }
 
   async proxyAIRequestWithConfig(aiConfig: { apiType?: string; baseUrl: string; apiKey: string; model: string; reasoningEffort?: string }, body: object, signal?: AbortSignal): Promise<unknown> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/ai`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/ai`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
+      headers: getEgressHeaders(),
       body: JSON.stringify({ config: aiConfig, body }),
       signal,
     }, 120000);
@@ -537,14 +574,15 @@ class BackendAdapter {
   }
 
   async proxyAIRequestWithFallback(configId: string, aiConfig: { apiType?: string; baseUrl: string; apiKey: string; model: string; reasoningEffort?: string }, body: object, signal?: AbortSignal): Promise<unknown> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
     // Try configId lookup first to avoid sending API key inline
     if (configId) {
       try {
-        const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/ai`, {
+        const res = await this.fetchWithTimeout(`${egressUrl}/proxy/ai`, {
           method: 'POST',
-          headers: this.getAuthHeaders(),
+          headers: getEgressHeaders(),
           body: JSON.stringify({ configId, body }),
           signal,
         }, 120000);
@@ -867,15 +905,16 @@ class BackendAdapter {
     }
   }
 
-  // === GitHub Search Proxy ===
+  // === GitHub Search Proxy（经 egress 层代发，非数据后端） ===
 
   async searchRepositories(queryParams: Record<string, string>): Promise<{ items: Repository[] }> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/search/repositories`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/search/repositories`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ query_params: queryParams })
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ query_params: queryParams, githubToken: getSessionGithubToken() })
     });
     if (!res.ok) await this.throwTranslatedError(res, 'Search repositories proxy error');
     return res.json() as Promise<{ items: Repository[] }>;
@@ -890,12 +929,13 @@ class BackendAdapter {
     public_repos: number;
     followers: number;
   }> }> {
-    if (!this._backendUrl) throw new Error('Backend not available');
+    const egressUrl = getEgressBaseUrl();
+    if (!egressUrl) throw new Error('Egress backend not available');
 
-    const res = await this.fetchWithTimeout(`${this._backendUrl}/proxy/github/search/users`, {
+    const res = await this.fetchWithTimeout(`${egressUrl}/proxy/github/search/users`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: JSON.stringify({ query_params: queryParams })
+      headers: getEgressHeaders(),
+      body: JSON.stringify({ query_params: queryParams, githubToken: getSessionGithubToken() })
     });
     if (!res.ok) await this.throwTranslatedError(res, 'Search users proxy error');
     return res.json() as Promise<{ items: Array<{

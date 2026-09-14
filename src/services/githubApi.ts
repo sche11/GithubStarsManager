@@ -379,10 +379,11 @@ export class GitHubApiService {
       const viaProxy = this.backendUrl != null;
       try {
         if (this.backendUrl) {
-          // 通过后端代理路由：POST {backendUrl}/proxy/github/{endpoint}?query
-          // 服务端负责加鉴权头 + 读取代理配置 + 转发，所以客户端不再传 Authorization。
+          // 通过 egress 代理路由：POST {egressUrl}/proxy/github/{endpoint}?query
+          // egress 层（Vercel Function）无数据库，无法像魔搭侧那样自行读取
+          // GitHub token，因此必须随请求携带（本 service 构造时已持有）。
           const proxyUrl = `${this.backendUrl}/proxy/github${endpoint}`;
-          const proxyBody: Record<string, unknown> = { method };
+          const proxyBody: Record<string, unknown> = { method, githubToken: this.token };
           const requestHeaders = fetchOptions.headers as Record<string, string> | undefined;
           // 转发必要头（如 starred repos 需要 star+json，POST/PATCH 需要 JSON Content-Type）
           const acceptHeader = requestHeaders?.Accept || requestHeaders?.accept;
@@ -712,7 +713,7 @@ export class GitHubApiService {
    * 拉取 gist 单个文件的原始内容。
    * 用于 GitHub gist 详情 API 返回 truncated:true（文件 >1MB，content 被省略）时的回退取数。
    * raw_url 指向 gist.githubusercontent.com，不能复用 makeRequest（它会在前面拼 GITHUB_API_BASE）。
-   * 当 backendUrl 已设置时通过服务端代理路由（走用户配置的代理），否则直连。
+   * 当 backendUrl（egress 层）已设置时通过服务端代理路由，否则直连。
    */
   async getGistFileRaw(rawUrl: string, signal?: AbortSignal): Promise<string> {
     if (this.backendUrl) {
@@ -721,7 +722,7 @@ export class GitHubApiService {
         method: 'POST',
         signal,
         headers: this.getBackendHeaders(),
-        body: JSON.stringify({ url: rawUrl }),
+        body: JSON.stringify({ url: rawUrl, githubToken: this.token }),
       });
       if (!response.ok) {
         // 尝试从 JSON 错误体提取消息

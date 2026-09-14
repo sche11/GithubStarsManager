@@ -25,7 +25,7 @@ import type {
   WeeklySyncStatus,
 } from '../types';
 import { logger } from './logger';
-import { backend, getBackendAuthHeaders } from './backendAdapter';
+import { getEgressBaseUrl, getEgressHeaders } from './egressAdapter';
 import { fetchTelegramChannelViaDesktop } from './electronProxy';
 import type { GitHubApiService } from './githubApi';
 import { extractRepoFullNames } from './weeklyIssuesService';
@@ -105,11 +105,13 @@ export const defaultTelegramChannelTransport: TelegramChannelTransport = async (
       desktopError = error;
     }
   }
-  const backendUrl = backend.backendUrl;
-  if (backendUrl) {
+  // 出网抓取走 egress 层（Vercel Function）：魔搭出口到 t.me 不可达，
+  // 且服务端原实现用裸 fetch 不读用户代理配置。
+  const egressUrl = getEgressBaseUrl();
+  if (egressUrl) {
     const suffix = before ? `?before=${encodeURIComponent(before)}` : '';
-    const response = await fetch(`${backendUrl}/telegram/channel/${encodeURIComponent(channel)}${suffix}`, {
-      headers: getBackendAuthHeaders(),
+    const response = await fetch(`${egressUrl}/telegram/channel/${encodeURIComponent(channel)}${suffix}`, {
+      headers: getEgressHeaders(),
       signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) {

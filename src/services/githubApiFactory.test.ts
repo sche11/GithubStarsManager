@@ -4,8 +4,7 @@ import type { RouteMode } from '../types';
 const mocks = vi.hoisted(() => ({
   setBackendUrl: vi.fn(),
   setBackendAuthToken: vi.fn(),
-  backendUrlGet: vi.fn<() => string | null>(() => null),
-  isAvailableGet: vi.fn<() => boolean>(() => false),
+  egressBaseUrl: vi.fn<() => string | null>(() => null),
   routeMode: 'auto' as RouteMode,
 }));
 
@@ -23,11 +22,8 @@ vi.mock('./githubListsApi', () => ({
   },
 }));
 
-vi.mock('./backendAdapter', () => ({
-  backend: {
-    get backendUrl() { return mocks.backendUrlGet(); },
-    get isAvailable() { return mocks.isAvailableGet(); },
-  },
+vi.mock('./egressAdapter', () => ({
+  getEgressBaseUrl: () => mocks.egressBaseUrl(),
 }));
 
 vi.mock('../store/useAppStore', () => ({
@@ -38,45 +34,53 @@ vi.mock('../store/useAppStore', () => ({
 
 import { createGitHubApiService, createGitHubListsApiService } from './githubApiFactory';
 
-describe('githubApiFactory routeMode', () => {
+/**
+ * GitHub 出网走 egress 层（Vercel Function），不是数据后端（魔搭）。
+ * 因此这里的 URL 来源是 getEgressBaseUrl()，与 backendAdapter.backendUrl 无关。
+ */
+describe('githubApiFactory egress routing', () => {
   beforeEach(() => {
     mocks.setBackendUrl.mockClear();
     mocks.setBackendAuthToken.mockClear();
     mocks.routeMode = 'auto';
-    mocks.backendUrlGet.mockReturnValue(null);
-    mocks.isAvailableGet.mockReturnValue(false);
+    mocks.egressBaseUrl.mockReturnValue(null);
   });
 
-  it('does not set backend URL when backend is absent (auto)', () => {
-    mocks.backendUrlGet.mockReturnValue(null);
+  it('does not set egress URL when egress is unavailable (auto)', () => {
+    mocks.egressBaseUrl.mockReturnValue(null);
     createGitHubApiService('token');
     expect(mocks.setBackendUrl).not.toHaveBeenCalled();
   });
 
-  it('sets backend URL when backend exists in auto mode', () => {
-    mocks.backendUrlGet.mockReturnValue('http://backend/api');
+  it('sets egress URL when available in auto mode', () => {
+    mocks.egressBaseUrl.mockReturnValue('http://localhost/api');
     createGitHubApiService('token');
-    expect(mocks.setBackendUrl).toHaveBeenCalledWith('http://backend/api');
-    expect(mocks.setBackendAuthToken).toHaveBeenCalledWith('secret-value');
+    expect(mocks.setBackendUrl).toHaveBeenCalledWith('http://localhost/api');
   });
 
-  it('skips backend URL when routeMode is browser', () => {
-    mocks.routeMode = 'browser';
-    mocks.backendUrlGet.mockReturnValue('http://backend/api');
+  it('never forwards the data-backend API secret to the egress layer', () => {
+    // egress 层不使用 API_SECRET 鉴权；传入该值只会把魔搭密钥泄露到 Vercel 日志。
+    mocks.egressBaseUrl.mockReturnValue('http://localhost/api');
     createGitHubApiService('token');
-    expect(mocks.setBackendUrl).not.toHaveBeenCalled();
     expect(mocks.setBackendAuthToken).not.toHaveBeenCalled();
   });
 
-  it('keeps backend routing for the lists factory in auto mode', () => {
-    mocks.backendUrlGet.mockReturnValue('http://backend/api');
-    createGitHubListsApiService('token');
-    expect(mocks.setBackendUrl).toHaveBeenCalledWith('http://backend/api');
+  it('skips egress URL when routeMode is browser', () => {
+    mocks.routeMode = 'browser';
+    mocks.egressBaseUrl.mockReturnValue('http://localhost/api');
+    createGitHubApiService('token');
+    expect(mocks.setBackendUrl).not.toHaveBeenCalled();
   });
 
-  it('skips backend URL for the lists factory in browser mode', () => {
+  it('applies egress routing to the lists factory in auto mode', () => {
+    mocks.egressBaseUrl.mockReturnValue('http://localhost/api');
+    createGitHubListsApiService('token');
+    expect(mocks.setBackendUrl).toHaveBeenCalledWith('http://localhost/api');
+  });
+
+  it('skips egress URL for the lists factory in browser mode', () => {
     mocks.routeMode = 'browser';
-    mocks.backendUrlGet.mockReturnValue('http://backend/api');
+    mocks.egressBaseUrl.mockReturnValue('http://localhost/api');
     createGitHubListsApiService('token');
     expect(mocks.setBackendUrl).not.toHaveBeenCalled();
   });
