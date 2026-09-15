@@ -20,10 +20,17 @@ interface GitHubTreeResponse {
 const BACKEND_URL_STORAGE_KEY = 'github-stars-manager-backend-url';
 
 /**
- * 共享 helper：构造后端 API 鉴权头（fullstack Web 模式下 API_SECRET 的
- * `Authorization: Bearer ...`）。服务端 `authMiddleware` 对所有 `/api/*`
- * （除 health）要求该头，直接 `fetch(backendUrl/...)` 的传输层必须复用它，
- * 否则在配置 API_SECRET 时一律 401。
+ * 共享 helper：构造后端 API 鉴权头。
+ *
+ * 使用自定义头 `X-GSM-Secret` 而非标准的 `Authorization: Bearer ...`：
+ * 当后端托管在魔搭创空间时，平台反向代理会注入并覆盖 `Authorization`
+ * （魔搭官方声明该头由平台占用），导致服务端永远收不到调用方的密钥，
+ * 所有 `/api/*` 请求 401。服务端 `authMiddleware` 同时接受两种头，因此
+ * 自托管 / Electron / Vercel 场景不受影响。
+ *
+ * 服务端 authMiddleware 对所有 `/api/*`（除 health）要求该头，直接
+ * `fetch(backendUrl/...)` 的传输层必须复用本 helper，否则在配置
+ * API_SECRET 时一律 401。
  */
 export const getBackendAuthHeaders = (): Record<string, string> => {
   let secret = '';
@@ -36,7 +43,7 @@ export const getBackendAuthHeaders = (): Record<string, string> => {
     'Content-Type': 'application/json',
   };
   if (secret) {
-    headers['Authorization'] = `Bearer ${secret}`;
+    headers['X-GSM-Secret'] = secret;
   }
   return headers;
 };

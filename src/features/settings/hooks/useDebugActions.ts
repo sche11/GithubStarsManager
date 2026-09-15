@@ -12,7 +12,11 @@ export const useDebugActions = (): DebugActions => {
         const secret = sessionStorage.getItem('github-stars-manager-backend-secret');
         await fetch('/api/logs/debug', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` },
+          // 用 X-GSM-Secret 而非 Authorization：后端托管在魔搭时该标准头被平台覆盖。
+          headers: {
+            'Content-Type': 'application/json',
+            ...(secret ? { 'X-GSM-Secret': secret } : {}),
+          },
           body: JSON.stringify({ enabled: false }),
         });
       } catch { /* Backend unreachable — same silent behavior as the component */ }

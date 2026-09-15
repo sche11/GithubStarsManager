@@ -11,9 +11,14 @@ interface BackendLogsResponse {
   total: number;
 }
 
-const getHeaders = (): HeadersInit => ({
-  Authorization: `Bearer ${sessionStorage.getItem('github-stars-manager-backend-secret')}`,
-});
+/**
+ * 后端诊断请求头。
+ * 用 X-GSM-Secret 而非 Authorization：后端托管在魔搭时该标准头被平台覆盖。
+ */
+const getHeaders = (): HeadersInit => {
+  const secret = sessionStorage.getItem('github-stars-manager-backend-secret');
+  return secret ? { 'X-GSM-Secret': secret } : {};
+};
 
 /** Encapsulates optional backend diagnostics so the panel remains usable offline. */
 export const useDiagnosticBackendActions = ({ selectedScope }: UseDiagnosticBackendActionsOptions) => {
