@@ -18,7 +18,6 @@ import syncRouter from './routes/sync.js';
 import authRestoreRouter from './routes/authRestore.js';
 import proxyRouter from './routes/proxy.js';
 import logsRouter from './routes/logs.js';
-import diagRouter from './routes/diag.js';
 import mcpAdminRouter from './routes/mcp.js';
 import { mountMcpRoutes } from './mcp/http.js';
 
@@ -56,10 +55,6 @@ export function createApp(): express.Express {
   );
   app.use(morgan('combined', { stream: morganLoggerStream }));
   app.use(express.json({ limit: '50mb' }));
-
-  // 临时诊断端点：必须挂在 authMiddleware 之前，否则它自身也会 401，
-  // 无法回答「平台是否改写了鉴权头」这一问题。定位完成后删除。
-  app.use(diagRouter);
 
   // Auth middleware for all /api/* except /api/health
   app.use('/api', authMiddleware);
