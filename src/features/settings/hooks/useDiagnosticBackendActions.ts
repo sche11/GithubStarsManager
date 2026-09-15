@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import type { LogEntry, LogLevel } from '../../../services/logger';
 import { backend } from '../../../services/backendAdapter';
 
@@ -17,7 +17,7 @@ interface BackendLogsResponse {
  */
 const getHeaders = (): HeadersInit => {
   const secret = sessionStorage.getItem('github-stars-manager-backend-secret');
-  return secret ? { 'X-GSM-Secret': secret } : {};
+  return secret ? { 'X-Mx-ReqToken': secret } : {};
 };
 
 /** Encapsulates optional backend diagnostics so the panel remains usable offline. */

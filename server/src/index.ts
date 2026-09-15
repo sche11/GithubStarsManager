@@ -42,7 +42,10 @@ export function createApp(): express.Express {
       allowedHeaders: [
         'Content-Type',
         'Authorization',
-        // 自定义鉴权头：魔搭创空间会覆盖 Authorization，前端改用此头。
+        // 数据后端鉴权头。选 X-Mx-ReqToken 是因为它同时满足魔搭网关的
+        // 两个约束：在 CORS 预检白名单内，且不被平台消费（详见 auth.ts）。
+        'X-Mx-ReqToken',
+        // 兼容自托管场景下的备选头。
         'X-GSM-Secret',
         'X-MCP-Token',
         'Mcp-Session-Id',

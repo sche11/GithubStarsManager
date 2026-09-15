@@ -102,10 +102,9 @@ export function setEgressBaseUrl(value: string): boolean {
 /**
  * egress 请求的公共头。
  *
- * 与数据后端的头**刻意区分**：数据后端（魔搭）因平台占用 `Authorization`
- * 而使用 `X-GSM-Secret`，且需要携带 API_SECRET；egress 层（Vercel）直接用
- * 标准 `Authorization`，且**不携带数据后端的密钥**——避免把魔搭的 API_SECRET
- * 泄露给 Vercel 侧日志。
+ * 与数据后端的头**刻意区分**：数据后端（魔搭）使用 `X-Mx-ReqToken` 携带
+ * API_SECRET；egress 层（Vercel）不需要凭证即可调用，且**不携带数据后端的
+ * 密钥**——避免把魔搭的 API_SECRET 泄露给 Vercel 侧日志。
  */
 export function getEgressHeaders(): Record<string, string> {
   return { 'Content-Type': 'application/json' };

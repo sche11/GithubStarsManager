@@ -1,4 +1,4 @@
-import type { RpcDownloadConfig } from '../types';
+﻿import type { RpcDownloadConfig } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { backend } from './backendAdapter';
 
@@ -18,7 +18,7 @@ function getAuthHeaders(apiSecret?: string): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiSecret) {
     // X-GSM-Secret 而非 Authorization：后端托管在魔搭时该标准头被平台覆盖。
-    headers['X-GSM-Secret'] = apiSecret;
+    headers['X-Mx-ReqToken'] = apiSecret;
   }
   return headers;
 }

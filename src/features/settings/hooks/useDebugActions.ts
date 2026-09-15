@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+﻿import { useCallback } from 'react';
 import { backend } from '../../../services/backendAdapter';
 
 export interface DebugActions {
@@ -15,7 +15,7 @@ export const useDebugActions = (): DebugActions => {
           // 用 X-GSM-Secret 而非 Authorization：后端托管在魔搭时该标准头被平台覆盖。
           headers: {
             'Content-Type': 'application/json',
-            ...(secret ? { 'X-GSM-Secret': secret } : {}),
+            ...(secret ? { 'X-Mx-ReqToken': secret } : {}),
           },
           body: JSON.stringify({ enabled: false }),
         });

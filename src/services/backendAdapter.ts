@@ -22,15 +22,19 @@ const BACKEND_URL_STORAGE_KEY = 'github-stars-manager-backend-url';
 /**
  * 共享 helper：构造后端 API 鉴权头。
  *
- * 使用自定义头 `X-GSM-Secret` 而非标准的 `Authorization: Bearer ...`：
- * 当后端托管在魔搭创空间时，平台反向代理会注入并覆盖 `Authorization`
- * （魔搭官方声明该头由平台占用），导致服务端永远收不到调用方的密钥，
- * 所有 `/api/*` 请求 401。服务端 `authMiddleware` 同时接受两种头，因此
- * 自托管 / Electron / Vercel 场景不受影响。
+ * 使用自定义头 `X-Mx-ReqToken` 而非标准的 `Authorization: Bearer ...`。
+ * 魔搭创空间网关对鉴权头施加了双重约束（2026-09 实测，Playwright 真实浏览器验证）：
  *
- * 服务端 authMiddleware 对所有 `/api/*`（除 health）要求该头，直接
- * `fetch(backendUrl/...)` 的传输层必须复用本 helper，否则在配置
- * API_SECRET 时一律 401。
+ * | 头              | 网关 CORS 白名单 | 容器能否收到 | 可用           |
+ * |-----------------|------------------|--------------|----------------|
+ * | X-Mx-ReqToken   | 是               | 是           | 是             |
+ * | X-GSM-Secret    | 否               | 是           | 否（预检被拦）  |
+ * | X-Studio-Token  | 是               | 否（被消费）  | 否             |
+ * | Authorization   | 是               | 否（被覆盖）  | 否             |
+ *
+ * 只有 `X-Mx-ReqToken` 同时满足两个条件 —— 它是阿里遗留头，无标准语义，
+ * 网关既放行预检也不消费其值。服务端 authMiddleware 同时接受
+ * X-GSM-Secret 与 Authorization，以兼容自托管 / Electron 场景。
  */
 export const getBackendAuthHeaders = (): Record<string, string> => {
   let secret = '';
@@ -43,7 +47,7 @@ export const getBackendAuthHeaders = (): Record<string, string> => {
     'Content-Type': 'application/json',
   };
   if (secret) {
-    headers['X-GSM-Secret'] = secret;
+    headers['X-Mx-ReqToken'] = secret;
   }
   return headers;
 };

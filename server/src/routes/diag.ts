@@ -16,19 +16,25 @@ const router = Router();
  */
 router.get('/api/_diag/auth', (req, res) => {
   const headerNames = Object.keys(req.headers).sort();
-  const secret = typeof req.headers['x-gsm-secret'] === 'string' ? req.headers['x-gsm-secret'] : null;
-  const authz = typeof req.headers.authorization === 'string' ? req.headers.authorization : null;
+  const readHeader = (name: string): string | null => {
+    const raw = req.headers[name];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    return typeof value === 'string' && value ? value : null;
+  };
+
+  const mxReqToken = readHeader('x-mx-reqtoken');
+  const gsmSecret = readHeader('x-gsm-secret');
+  const authz = readHeader('authorization');
 
   res.json({
     // 服务端是否已注入 API_SECRET（只报长度，不报值）
     apiSecretConfigured: Boolean(config.apiSecret),
     apiSecretLength: config.apiSecret ? config.apiSecret.length : 0,
-    // 调用方发送的头
-    receivedXGsmSecret: secret !== null,
-    receivedXGsmSecretLength: secret ? secret.length : 0,
-    receivedAuthorization: authz !== null,
+    // 各候选头的到达情况（只报长度，用于区分「头被网关丢弃」与「值不匹配」）
+    receivedMxReqTokenLength: mxReqToken ? mxReqToken.length : 0,
+    receivedXGsmSecretLength: gsmSecret ? gsmSecret.length : 0,
     receivedAuthorizationLength: authz ? authz.length : 0,
-    // 本次请求实际可见的全部头名（判断平台是否透传自定义头）
+    // 本次请求实际可见的全部头名（判断网关是否透传自定义头）
     headerNames,
   });
 });
