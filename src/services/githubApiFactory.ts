@@ -19,7 +19,10 @@ import { shouldBypassBackend } from './routeMode';
  */
 function attachEgressIfAvailable(api: GitHubApiService | GitHubListsApiService): void {
   const egressUrl = getEgressBaseUrl();
-  if (egressUrl && !shouldBypassBackend()) {
+  // 上游测试用局部替身 mock 掉服务构造器（只实现被测方法），替身上没有
+  // setBackendUrl。真实 service 始终具备该方法，因此这里的存在性判断
+  // 不会改变生产路径，只保证「代理不可用时 attach 是空操作」这一语义。
+  if (egressUrl && !shouldBypassBackend() && typeof api.setBackendUrl === 'function') {
     api.setBackendUrl(egressUrl);
   }
 }
