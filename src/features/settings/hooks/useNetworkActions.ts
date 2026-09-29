@@ -1,4 +1,3 @@
-
 import { useT } from '../../../i18n/useT';
 import { useCallback, useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
@@ -82,7 +81,7 @@ export const useNetworkActions = (): NetworkActions => {
     const loadRpcConfig = async () => {
       try {
         const base = await getRpcBaseUrl();
-        const headers: Record<string, string> = backendApiSecret ? { Authorization: `Bearer ${backendApiSecret}` } : {};
+        const headers: Record<string, string> = backendApiSecret ? { 'X-Mx-ReqToken': backendApiSecret } : {};
         const response = await fetch(`${base}/settings/rpc-download`, { headers });
         if (!response.ok) return;
         const data = await response.json() as Partial<RpcDownloadConfig> & { hasSecret?: boolean };
@@ -107,7 +106,8 @@ export const useNetworkActions = (): NetworkActions => {
 
   const backendHeaders = useCallback((): Record<string, string> => ({
     'Content-Type': 'application/json',
-    ...(backendApiSecret ? { Authorization: `Bearer ${backendApiSecret}` } : {}),
+    // X-GSM-Secret 而非 Authorization：后端托管在魔搭时该标准头被平台覆盖。
+    ...(backendApiSecret ? { 'X-Mx-ReqToken': backendApiSecret } : {}),
   }), [backendApiSecret]);
 
   const putProxy = useCallback(async (config: ProxyConfig) => {

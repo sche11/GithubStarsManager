@@ -31,7 +31,7 @@ import type {
   XTweetFollow,
 } from '../types';
 import { logger } from './logger';
-import { backend, getBackendAuthHeaders } from './backendAdapter';
+import { getEgressBaseUrl, getEgressHeaders } from './egressAdapter';
 import { fetchXTimelineViaDesktop, fetchXGraphQLViaDesktop } from './electronProxy';
 import type { GitHubApiService } from './githubApi';
 import { extractRepoFullNames } from './weeklyIssuesService';
@@ -112,10 +112,12 @@ export const defaultXTimelineTransport: XTimelineTransport = async (handle) => {
       desktopError = error;
     }
   }
-  const backendUrl = backend.backendUrl;
-  if (backendUrl) {
-    const response = await fetch(`${backendUrl}/xtweet/profile/${encodeURIComponent(handle)}`, {
-      headers: getBackendAuthHeaders(),
+  // 出网抓取走 egress 层（Vercel Function）：魔搭出口到 x.com 不可达，
+  // 且服务端原实现用裸 fetch 不读用户代理配置。
+  const egressUrl = getEgressBaseUrl();
+  if (egressUrl) {
+    const response = await fetch(`${egressUrl}/xtweet/profile/${encodeURIComponent(handle)}`, {
+      headers: getEgressHeaders(),
       signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) {
@@ -194,11 +196,11 @@ export const defaultXGraphQLTransport: XGraphQLTransport = async (url, auth) => 
       desktopError = error;
     }
   }
-  const backendUrl = backend.backendUrl;
-  if (backendUrl) {
-    const response = await fetch(`${backendUrl}/xtweet/graphql`, {
+  const egressUrl = getEgressBaseUrl();
+  if (egressUrl) {
+    const response = await fetch(`${egressUrl}/xtweet/graphql`, {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getEgressHeaders(),
       body: JSON.stringify({ url, auth }),
       signal: AbortSignal.timeout(30_000),
     });

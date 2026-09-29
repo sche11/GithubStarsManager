@@ -1,24 +1,34 @@
-import { useAppStore } from '../store/useAppStore';
-import { backend } from './backendAdapter';
+import { getEgressBaseUrl } from './egressAdapter';
 import { GitHubApiService } from './githubApi';
 import { GitHubListsApiService } from './githubListsApi';
 import { shouldBypassBackend } from './routeMode';
 
 /**
- * 决定新建的 service 是否应附加后端代理。
- * 仅在后端可用、且当前 routeMode 不为 'browser' 时返回 true。
- * 构造时读取一次 routeMode；切换 routeMode 后已存在的 service 不会热重路由，
- * 新建的 service 才会按当前偏好决定。
+ * 为新建的 GitHub service 附加 egress 代理地址。
+ *
+ * 与多平台架构的关系：GitHub 出网必须经 Vercel Function（魔搭出口在阿里云
+ * 华北 2，到 api.github.com 可达性不稳定），因此这里的 URL 来源是
+ * `getEgressBaseUrl()`（默认与静态前端同源），而**不是**数据后端地址。
+ *
+ * 鉴权说明：egress 层只做同源校验（防跨站滥用），不使用 API_SECRET；GitHub
+ * token 由请求体携带。因此这里刻意**不**注入 `backendApiSecret`——避免把魔搭
+ * 的数据后端密钥泄露给 Vercel 侧日志。
+ *
+ * 每个 service 在构造时读取一次 routeMode 与 egress 地址；切换 routeMode 后
+ * 已存在的 service 不会热重路由，新建的 service 才会按当前偏好决定。
  */
-function shouldAttachBackend(): boolean {
-  return backend.backendUrl != null && !shouldBypassBackend();
+function attachEgressIfAvailable(api: GitHubApiService | GitHubListsApiService): void {
+  const egressUrl = getEgressBaseUrl();
+  if (egressUrl && !shouldBypassBackend()) {
+    api.setBackendUrl(egressUrl);
+  }
 }
 
 export interface CreateGitHubApiServiceOptions {
   /**
-   * 即使后端可用也直连 api.github.com。
+   * 即使 egress 层可用也直连 api.github.com。
    * 用于"身兼两职"的取数助手：在 browser 模式/无后端时是主路径，
-   * 在后端请求失败后又是兜底路径——兜底再走刚失败的后端会失去意义
+   * 在代理请求失败后又是兜底路径——兜底再走刚失败的代理会失去意义
    * （与 githubListsApi 的 sticky 直连回退惯例一致）。
    */
   direct?: boolean;
@@ -29,22 +39,12 @@ export function createGitHubApiService(
   options: CreateGitHubApiServiceOptions = {},
 ): GitHubApiService {
   const api = new GitHubApiService(token);
-
-  if (!options.direct && shouldAttachBackend()) {
-    api.setBackendUrl(backend.backendUrl);
-    api.setBackendAuthToken(useAppStore.getState().backendApiSecret || null);
-  }
-
+  if (!options.direct) attachEgressIfAvailable(api);
   return api;
 }
 
 export function createGitHubListsApiService(token: string): GitHubListsApiService {
   const api = new GitHubListsApiService(token);
-
-  if (shouldAttachBackend()) {
-    api.setBackendUrl(backend.backendUrl);
-    api.setBackendAuthToken(useAppStore.getState().backendApiSecret || null);
-  }
-
+  attachEgressIfAvailable(api);
   return api;
 }
