@@ -1,5 +1,6 @@
 import { WebDAVConfig } from '../types';
 import { logger } from './logger';
+import { backend } from './backendAdapter';
 
 export class WebDAVService {
   private config: WebDAVConfig;
@@ -35,6 +36,11 @@ export class WebDAVService {
     return { sizeKB, isLarge, suggestions };
   }
 
+  // 确定的非瞬时错误：DNS 解析失败、连接被拒、证书/TLS 校验失败、代理隧道失败。
+  // 这类失败重试只会得到同样的结果，直接抛出让用户尽快看到可操作提示
+  private static readonly NON_TRANSIENT_CAUSE =
+    /ENOTFOUND|ERR_NAME_NOT_RESOLVED|EAI_AGAIN|ECONNREFUSED|ERR_CONNECTION_REFUSED|_CERT|UNABLE_TO_|ERR_SSL|EPROTO|ERR_PROXY|ERR_TUNNEL/i;
+
   // 重试机制
   private async retryUpload<T>(
     operation: () => Promise<T>,
@@ -54,11 +60,13 @@ export class WebDAVService {
         }
 
         const errMsg = lastError.message;
+        const causeCode = (lastError as { causeCode?: string }).causeCode ?? '';
         const shouldRetry =
-          errMsg.includes('超时') ||
-          errMsg.includes('timeout') ||
-          errMsg.includes('NetworkError') ||
-          errMsg.includes('fetch');
+          !WebDAVService.NON_TRANSIENT_CAUSE.test(`${causeCode} ${errMsg}`) &&
+          (errMsg.includes('超时') ||
+            errMsg.includes('timeout') ||
+            errMsg.includes('NetworkError') ||
+            errMsg.includes('fetch'));
 
         if (!shouldRetry) {
           throw lastError;
@@ -83,15 +91,111 @@ export class WebDAVService {
     return `${this.config.url}${basePath}${filename}`;
   }
 
+  // 相对配置 URL 的路径（不含协议与主机），用于交给后端代理
+  private getRelativePath(filename: string): string {
+    const basePath = this.config.path.endsWith('/') ? this.config.path : `${this.config.path}/`;
+    return `${basePath}${filename}`;
+  }
+
+  /**
+   * 发起 WebDAV 请求，按可用性依次选择传输层：
+   * 1. Electron 桌面版：主进程代发（渲染进程没有后端，且 file:// 源同样受 CORS 约束）
+   * 2. 后端可用：POST /api/proxy/webdav，由服务端代为请求
+   * 3. 纯浏览器 / 静态部署：回退为浏览器直连
+   * @param requestPath 相对配置 URL 的路径，如 "/backup/data.json"
+   * @param init.timeoutMs 业务级超时，需与调用方的 AbortController 保持一致
+   */
+  private async davFetch(
+    method: string,
+    requestPath: string,
+    init?: { headers?: Record<string, string>; body?: string; signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Response> {
+    const targetUrl = `${this.config.url}${requestPath}`;
+
+    if (window.electronAPI?.webdavRequest) {
+      return this.desktopDavFetch(method, targetUrl, init);
+    }
+
+    if (backend.isAvailable) {
+      // Authorization 由后端依据配置生成，避免两份凭据冲突
+      const forwardHeaders: Record<string, string> = { ...(init?.headers ?? {}) };
+      delete forwardHeaders['Authorization'];
+      return backend.proxyWebDAV(
+        this.config.id,
+        method,
+        requestPath,
+        init?.body,
+        forwardHeaders,
+        { url: this.config.url, username: this.config.username, password: this.config.password },
+        init?.signal,
+        init?.timeoutMs,
+      );
+    }
+
+    return fetch(targetUrl, {
+      method,
+      headers: init?.headers,
+      body: init?.body,
+      signal: init?.signal,
+    });
+  }
+
+  /**
+   * 桌面版主进程代发 WebDAV 请求，并还原成标准 Response，
+   * 使上层调用方（依赖 response.ok / status / text()）无需区分传输层。
+   */
+  private async desktopDavFetch(
+    method: string,
+    targetUrl: string,
+    init?: { headers?: Record<string, string>; body?: string; signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Response> {
+    const result = await window.electronAPI!.webdavRequest!({
+      url: targetUrl,
+      method,
+      headers: init?.headers ?? {},
+      body: init?.body,
+      timeoutMs: init?.timeoutMs,
+    });
+
+    if (!result.success) {
+      // 归一成 AbortError，让上层沿用既有的超时提示文案
+      if (result.timedOut) {
+        throw new DOMException('WebDAV request timed out', 'AbortError');
+      }
+      const err = new TypeError(result.error || 'WebDAV request failed');
+      // 结构化 cause 供 handleNetworkError 映射为可操作的排查建议
+      if (result.causeCode) (err as Error & { causeCode?: string }).causeCode = result.causeCode;
+      throw err;
+    }
+
+    const bodyless = result.status === 204 || result.status === 304 || method === 'HEAD';
+    return new Response(bodyless ? null : (result.body ?? ''), {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.contentType ? { 'Content-Type': result.contentType } : undefined,
+    });
+  }
+
   private handleNetworkError(error: unknown, operation: string): never {
     logger.error('webdav', `WebDAV ${operation} failed`, error);
-    
-    const err = error as Error;
+
+    const err = error as Error & { causeCode?: string };
+
+    // 桌面版：请求由主进程代发，不存在 CORS 限制；失败是真实的网络/TLS 问题，
+    // 按主进程透传的底层错误码给出可操作的排查建议。判断条件须与 davFetch 的
+    // 传输层选择一致（electronAPI 存在但未暴露 webdavRequest 的旧 preload 会
+    // 走后端/浏览器直连路径，不能套用主进程文案）
+    if (window.electronAPI?.webdavRequest) {
+      throw new Error(this.describeDesktopFailure(err, operation));
+    }
+
     const isCorsError = (
       (err.name === 'TypeError' && err.message.includes('Failed to fetch')) ||
       (err.message && err.message.includes('NetworkError when attempting to fetch resource')) ||
       (err.name === 'NetworkError') ||
-      (err.message && err.message.includes('NetworkError'))
+      (err.message && err.message.includes('NetworkError')) ||
+      // Safari 对同类网络失败的文案
+      (err.message && err.message.includes('Load failed'))
     );
 
     if (isCorsError) {
@@ -127,6 +231,69 @@ export class WebDAVService {
     throw new Error(`WebDAV ${operation} 失败: ${err.message || '未知错误'}`);
   }
 
+  /**
+   * 桌面版（主进程代发）网络失败的可操作描述。主进程会回传 cause 链与
+   * causeCode（undici 的 "fetch failed" 本身不含信息），这里映射为排查建议：
+   * 先按结构化 causeCode 精确归类（它是主进程认定的最相关失败），
+   * 匹配不到再退一步对消息全文做包含匹配（覆盖另一网络栈的明细文本）。
+   */
+  private describeDesktopFailure(err: Error & { causeCode?: string }, operation: string): string {
+    const ADVICE_BY_TOKENS: Array<{ tokens: string[]; advice: string }> = [
+      {
+        tokens: ['ENOTFOUND', 'EAI_AGAIN', 'ERR_NAME_NOT_RESOLVED'],
+        advice: '无法解析 WebDAV 服务器地址。请检查 URL 中的主机名是否正确，以及当前网络的 DNS 是否可用。',
+      },
+      {
+        tokens: ['ECONNREFUSED', 'ERR_CONNECTION_REFUSED'],
+        advice: '服务器拒绝了连接。请确认 WebDAV 服务已启动且端口正确；如果是局域网地址，请确认本机与服务器在同一网络内。',
+      },
+      {
+        tokens: ['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT', 'ERR_CERT_AUTHORITY_INVALID'],
+        advice: '服务器证书未被信任（常见于自签名证书）。请为 WebDAV 服务器配置受信任的证书；局域网服务可改用 http:// 地址。',
+      },
+      {
+        tokens: ['CERT_HAS_EXPIRED', 'ERR_CERT_DATE_INVALID'],
+        advice: '服务器证书已过期。请更新 WebDAV 服务器的证书；局域网服务可改用 http:// 地址。',
+      },
+      {
+        tokens: ['ERR_PROXY_CONNECTION_FAILED', 'ERR_TUNNEL_CONNECTION_FAILED', 'ERR_PROXY_AUTH_UNSUPPORTED', 'ERR_MANDATORY_PROXY_CONFIGURATION_FAILED'],
+        advice: '经由代理连接失败。请检查“设置 → 网络设置”中的代理配置是否可用；也可以暂时关闭应用内代理、改用系统代理后重试。',
+      },
+      {
+        tokens: ['UND_ERR_CONNECT_TIMEOUT', 'ETIMEDOUT', 'ERR_TIMED_OUT'],
+        advice: '连接超时。请检查本机网络；如果需要通过代理/VPN 访问该服务器，请在“设置 → 网络设置”中配置代理后重试。',
+      },
+      {
+        tokens: ['ENETUNREACH', 'EHOSTUNREACH', 'ERR_ADDRESS_UNREACHABLE', 'ERR_NETWORK_UNREACHABLE'],
+        advice: '网络不可达。请检查本机网络连接；如果是局域网地址，请确认本机与服务器在同一网络内。',
+      },
+      {
+        tokens: ['ECONNRESET', 'ERR_CONNECTION_RESET'],
+        advice: '连接被重置。服务器或中间网络设备中断了连接，请稍后重试或检查服务器配置。',
+      },
+      {
+        tokens: ['EPROTO', 'ERR_SSL', 'SSLV3_ALERT', 'TLSV1_ALERT', 'ERR_SSL_PROTOCOL_ERROR'],
+        advice: 'TLS 握手失败。请确认 URL 的协议与服务器匹配（http/https 不要填错），并检查服务器的 TLS 配置。',
+      },
+    ];
+
+    const codeUpper = (err.causeCode ?? '').toUpperCase();
+    const text = `${codeUpper} ${err.message ?? ''}`.toUpperCase();
+    // 结构化 code 优先（避免消息里多栈明细文本抢错分类），全文匹配兜底
+    let advice: string | null = null;
+    if (codeUpper) {
+      advice = ADVICE_BY_TOKENS.find((b) => b.tokens.some((t) => codeUpper === t))?.advice ?? null;
+    }
+    if (!advice) {
+      advice = ADVICE_BY_TOKENS.find((b) => b.tokens.some((t) => text.includes(t)))?.advice ?? null;
+    }
+
+    if (advice) {
+      return `WebDAV ${operation} 失败：${advice}\n\n技术详情: ${err.message}`;
+    }
+    return `WebDAV ${operation} 失败: ${err.message || '未知错误'}\n\n提示：桌面版的 WebDAV 请求由主进程代发。若服务器需要代理/VPN 才能访问，请在“设置 → 网络设置”中配置代理；若服务器使用自签名证书，请改用受信任的证书或 http:// 地址。`;
+  }
+
   async testConnection(): Promise<boolean> {
     try {
       // 验证URL格式
@@ -134,47 +301,136 @@ export class WebDAVService {
         throw new Error('WebDAV URL必须以 http:// 或 https:// 开头');
       }
 
-      // 构建用于测试的目录URL（优先测试配置中的 path）
-      const dirUrl = `${this.config.url}${this.config.path}`;
+      // 测试配置中的 path（交由 davFetch 决定走后端代理还是浏览器直连）
 
-      // 先尝试 HEAD 请求检测基本可达性（某些服务器对 PROPFIND/OPTIONS 支持较差）
+      // 先用 PROPFIND（Depth: 0）探测：这是 WebDAV 规范（RFC 4918）定义的标准方法，
+      // 成功返回 200 或 207 Multi-Status。HEAD 并非 WebDAV 规范的必备方法，部分
+      // 服务器（如坚果云 dav.jianguoyun.com）对集合路径的 HEAD 直接返回 403，
+      // 若以 HEAD 首发会让每次测试连接都多付一次 403 往返与一条警告日志。
+      //
+      // 10 秒预算覆盖整个探测过程（首发 + 降级回退），从首发前起算：
+      // - 浏览器直连/后端代理：请求共用 AbortController，定时器到点中止整个探测，
+      //   因此在探测结束前不得提前清除定时器；
+      // - 桌面端 IPC 无法跨进程传 AbortSignal，每次请求自带独立超时预算，
+      //   故传剩余时间作为 timeoutMs；剩余不足 1s 时不再发起新的 IPC 请求
+      //   （避免最坏 2×10s 的总耗时），直接按连接超时处理。
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+      const deadline = Date.now() + 10000;
+      const remainingTimeoutMs = (): number => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0 || (window.electronAPI?.webdavRequest && remaining <= 1000)) {
+          throw new DOMException('WebDAV request timed out', 'AbortError');
+        }
+        return remaining;
+      };
 
       try {
-        const headResponse = await fetch(dirUrl, {
-          method: 'HEAD',
+        let propfindResponse: Response;
+        try {
+          propfindResponse = await this.davFetch('PROPFIND', this.config.path, {
+            headers: {
+              'Authorization': this.getAuthHeader(),
+              'Depth': '0',
+            },
+            signal: controller.signal,
+            timeoutMs: remainingTimeoutMs(),
+          });
+        } catch (propfindError: unknown) {
+          // 浏览器直连时，PROPFIND 可能被 CORS 预检直接拒绝而抛网络错误
+          //（HEAD 是 CORS 安全方法、无预检问题）：非超时错误时降级 HEAD 再试，
+          // 不能把可用的连接误报为失败。超时错误仍按连接超时处理。
+          if ((propfindError as Error).name === 'AbortError') throw propfindError;
+          const headAfterError = await this.davFetch('HEAD', this.config.path, {
+            headers: {
+              'Authorization': this.getAuthHeader(),
+            },
+            signal: controller.signal,
+            timeoutMs: remainingTimeoutMs(),
+          });
+          clearTimeout(timeoutId);
+          return headAfterError.ok;
+        }
+
+        // 注意顺序：207 ∈ [200,299]，Response.ok 对 207 也为 true，
+        // 必须先判 207 再判 ok，否则多状态体检查永远不可达。
+        if (propfindResponse.status === 207) {
+          // RFC 4918：207 外层成功不代表目标资源本身成功，响应体可为目标
+          // href 携带资源级失败状态；须检查目标路径的探测结果再判定。
+          const targetOk = await this.multistatusTargetSucceeded(propfindResponse, this.config.path);
+          clearTimeout(timeoutId);
+          return targetOk;
+        }
+        if (propfindResponse.ok) {
+          clearTimeout(timeoutId);
+          return true;
+        }
+
+        // PROPFIND 不可用时，降级尝试 HEAD（兼容仅放行普通 HTTP 方法的网关/服务器）。
+        // 回退请求共用同一 AbortController，10 秒预算覆盖到回退完成才清除定时器。
+        const headResponse = await this.davFetch('HEAD', this.config.path, {
           headers: {
             'Authorization': this.getAuthHeader(),
           },
           signal: controller.signal,
+          timeoutMs: remainingTimeoutMs(),
         });
 
         clearTimeout(timeoutId);
-
-        if (headResponse.ok) return true;
-
-        // HEAD 不可用时，尝试 PROPFIND（不少服务器返回 207 Multi-Status 表示成功）
-        const propfindResponse = await fetch(dirUrl, {
-          method: 'PROPFIND',
-          headers: {
-            'Authorization': this.getAuthHeader(),
-            'Depth': '0',
-          },
-        });
-
-        return propfindResponse.ok || propfindResponse.status === 207;
+        return headResponse.ok;
       } catch (fetchError: unknown) {
         clearTimeout(timeoutId);
-        
+
         if ((fetchError as Error).name === 'AbortError') {
           throw new Error('连接超时。请检查WebDAV服务器是否可访问。');
         }
-        
+
         throw fetchError;
       }
     } catch (error: unknown) {
       return this.handleNetworkError(error, '连接测试');
+    }
+  }
+
+  /**
+   * RFC 4918：207 Multi-Status 的外层成功不代表目标资源本身成功——响应体可为
+   * 目标 href 携带资源级失败状态（如 404）。解析多状态体并检查目标路径对应的
+   * response 条目：无资源级 status（仅属性级 propstat 状态，个别属性 404 属
+   * 正常现象）或资源级状态为 2xx 视为成功。找不到目标条目或解析失败时按外层
+   * 207 放行——href 形态因服务器而异（绝对 URI、百分号编码、尾斜杠），
+   * 过度严格会把可用连接误判为失败。
+   */
+  private async multistatusTargetSucceeded(response: Response, targetPath: string): Promise<boolean> {
+    try {
+      const body = await response.text();
+      const doc = new DOMParser().parseFromString(body, 'application/xml');
+      const responses = Array.from(doc.getElementsByTagName('*')).filter((el) => el.localName === 'response');
+      if (responses.length === 0) return true;
+
+      const normalizedTarget = `/${targetPath.replace(/^\/+|\/+$/g, '')}`.toLowerCase();
+      const match = responses.find((el) => {
+        const hrefEl = Array.from(el.children).find((child) => child.localName === 'href');
+        if (!hrefEl) return false;
+        let href = hrefEl.textContent ?? '';
+        try {
+          href = decodeURIComponent(href);
+        } catch { /* 非法百分号编码按原文匹配 */ }
+        const path = href.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '').replace(/\/+$/, '').toLowerCase();
+        // 精确匹配：宽松的 endsWith 会让 /old/backup 误配 /backup，或让空路径
+        // 选中任意条目——多状态体里先出现失败条目时会读错资源级状态。
+        if (path === '' && normalizedTarget === '/') return true;
+        return path === normalizedTarget;
+      });
+      if (!match) return true;
+
+      // 只认 response 的直接子级 status（资源级）；propstat 内的 status 属于
+      // 个别属性，404 不代表资源不存在。
+      const statusEl = Array.from(match.children).find((child) => child.localName === 'status');
+      if (!statusEl) return true;
+      const code = Number((statusEl.textContent ?? '').match(/\b(\d{3})\b/)?.[1] ?? 0);
+      return code === 0 ? true : code >= 200 && code < 300;
+    } catch {
+      return true; // 解析失败按外层 207 放行，不误伤可用连接
     }
   }
 
@@ -210,14 +466,14 @@ export class WebDAVService {
         const startTime = Date.now();
 
         try {
-          const response = await fetch(this.getFullPath(filename), {
-            method: 'PUT',
+          const response = await this.davFetch('PUT', this.getRelativePath(filename), {
             headers: {
               'Authorization': this.getAuthHeader(),
               'Content-Type': 'application/json',
             },
             body: compressedContent,
             signal: controller.signal,
+            timeoutMs: dynamicTimeout,
           });
 
           clearTimeout(timeoutId);
@@ -283,11 +539,10 @@ export class WebDAVService {
 
       for (const seg of segments) {
         currentPath += `/${seg}`;
-        const full = `${this.config.url}${currentPath}`;
         try {
-          const res = await fetch(full, {
-            method: 'MKCOL',
+          const res = await this.davFetch('MKCOL', currentPath, {
             headers: { 'Authorization': this.getAuthHeader() },
+            timeoutMs: 15000,
           });
 
           // 201 Created（新建）或 405 Method Not Allowed（已存在）都视为成功
@@ -317,12 +572,12 @@ export class WebDAVService {
       const startTime = Date.now();
 
       try {
-        const response = await fetch(this.getFullPath(filename), {
-          method: 'GET',
+        const response = await this.davFetch('GET', this.getRelativePath(filename), {
           headers: {
             'Authorization': this.getAuthHeader(),
           },
           signal: controller.signal,
+          timeoutMs: 30000,
         });
 
         clearTimeout(timeoutId);
@@ -367,21 +622,51 @@ export class WebDAVService {
   }
 
   async fileExists(filename: string): Promise<boolean> {
+    // 10 秒预算覆盖整个检查过程（首发 HEAD + 403 时的 PROPFIND 回退），
+    // 与 testConnection 相同的 deadline 语义（见彼处注释）。
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+    const deadline = Date.now() + 10000;
+    const remainingTimeoutMs = (): number => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || (window.electronAPI?.webdavRequest && remaining <= 1000)) {
+        throw new DOMException('WebDAV request timed out', 'AbortError');
+      }
+      return remaining;
+    };
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
-
-      const response = await fetch(this.getFullPath(filename), {
-        method: 'HEAD',
+      const response = await this.davFetch('HEAD', this.getRelativePath(filename), {
         headers: {
           'Authorization': this.getAuthHeader(),
         },
         signal: controller.signal,
+        timeoutMs: remainingTimeoutMs(),
       });
+
+      // HEAD 并非 WebDAV 规范必备方法：部分服务器（如坚果云）对 HEAD 返回 403，
+      // 不能据此断定文件不存在。降级用 PROPFIND（Depth: 0）确认；若 403 出于真实
+      // 权限原因，PROPFIND 同样会被拒并如实返回 false。回退请求共用同一
+      // AbortController，10 秒预算覆盖到回退完成才清除定时器。
+      if (response.status === 403) {
+        const propfindResponse = await this.davFetch('PROPFIND', this.getRelativePath(filename), {
+          headers: {
+            'Authorization': this.getAuthHeader(),
+            'Depth': '0',
+          },
+          signal: controller.signal,
+          timeoutMs: remainingTimeoutMs(),
+        });
+        clearTimeout(timeoutId);
+        // 207 ∈ [200,299] 时 Response.ok 为 true，须先判 207 检查多状态体
+        return propfindResponse.status === 207
+          ? await this.multistatusTargetSucceeded(propfindResponse, this.getRelativePath(filename))
+          : propfindResponse.ok;
+      }
 
       clearTimeout(timeoutId);
       return response.ok;
     } catch (error) {
+      clearTimeout(timeoutId);
       logger.error('webdav', 'WebDAV文件检查失败', error);
       return false;
     }
@@ -397,8 +682,7 @@ export class WebDAVService {
         const basePath = this.config.path.endsWith('/') ? this.config.path : `${this.config.path}/`;
         const collectionUrl = `${this.config.url}${basePath}`;
 
-        const response = await fetch(collectionUrl, {
-          method: 'PROPFIND',
+        const response = await this.davFetch('PROPFIND', basePath, {
           headers: {
             'Authorization': this.getAuthHeader(),
             'Depth': '1',
@@ -413,6 +697,7 @@ export class WebDAVService {
               </D:prop>
             </D:propfind>`,
           signal: controller.signal,
+          timeoutMs: 15000,
         });
 
         clearTimeout(timeoutId);
@@ -528,11 +813,11 @@ export class WebDAVService {
   // 新增：获取服务器信息
   async getServerInfo(): Promise<{ server?: string; davLevel?: string }> {
     try {
-      const response = await fetch(this.config.url, {
-        method: 'OPTIONS',
+      const response = await this.davFetch('OPTIONS', '', {
         headers: {
           'Authorization': this.getAuthHeader(),
         },
+        timeoutMs: 10000,
       });
 
       if (response.ok) {

@@ -1,11 +1,16 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { TooltipProvider } from './ui/tooltip';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RepositoryCard } from './RepositoryCard';
+import { PluginPageHost } from './PluginPageHost';
 import { useAppStore } from '../store/useAppStore';
 import { useRepositoryDragStore } from '../store/useRepositoryDragStore';
+import { pluginPageSession } from '../plugins/pluginPageSession';
+import { pluginRegistry } from '../plugins/pluginRegistry';
+import { DialogProvider } from '../hooks/useDialog';
 import type { Repository } from '../types';
+import { DEFAULT_REPOSITORY_CARD_ACTIONS } from '../types/repositoryCardActions';
 
 const actionMocks = vi.hoisted(() => ({
   releaseSheet: {
@@ -61,6 +66,23 @@ vi.mock('./RepositoryReleaseSheet', () => ({
   },
 }));
 
+vi.mock('./PluginPageModal', () => ({
+  PluginPageModal: ({ pageTitle }: { pageTitle: string }) => (
+    <div role="dialog" aria-label={pageTitle} />
+  ),
+}));
+
+const pluginClientMocks = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
+vi.mock('../plugins/pluginClient', () => ({
+  pluginClient: {
+    isSupported: () => true,
+    list: pluginClientMocks.list,
+  },
+}));
+
 const repository: Repository = {
   id: 1,
   name: 'example-repository',
@@ -92,6 +114,7 @@ const storeState = {
   language: 'zh' as const,
   // 卡片可见字段（开发守则 §14）：默认全开，单个用例里按需改
   repositoryCardFields: { description: true, tags: true, language: true, stars: true, license: true, lastUpdated: true },
+  repositoryCardActions: DEFAULT_REPOSITORY_CARD_ACTIONS.map((item) => ({ ...item })),
   updateRepository: vi.fn(),
   deleteRepository: vi.fn(),
   vectorSearchConfig: {
@@ -125,13 +148,20 @@ const renderRepositoryCard = (
   viewMode: 'list' | 'grid',
   options: { onAskRepository?: (repository: Repository) => void; selectionMode?: boolean } = {},
 ) => render(
-  <TooltipProvider>
-    <RepositoryCard repository={repository} allCategories={[]} viewMode={viewMode} {...options} />
-  </TooltipProvider>
+  <DialogProvider>
+    <TooltipProvider>
+      <RepositoryCard repository={repository} allCategories={[]} viewMode={viewMode} {...options} />
+    </TooltipProvider>
+  </DialogProvider>
 );
 
 beforeEach(() => {
+  cleanup();
+  document.body.innerHTML = '';
   vi.clearAllMocks();
+  pluginClientMocks.list.mockResolvedValue({ plugins: [], invalidPlugins: [] });
+  pluginRegistry.resetForTests();
+  pluginPageSession.close();
   actionMocks.releaseSheet.suspend = null;
   useRepositoryDragStore.getState().endDrag();
   storeState.releaseSubscriptions = new Set<number>([1]);
@@ -143,6 +173,7 @@ beforeEach(() => {
     license: true,
     lastUpdated: true,
   };
+  storeState.repositoryCardActions = DEFAULT_REPOSITORY_CARD_ACTIONS.map((item) => ({ ...item }));
   storeState.vectorSearchConfig.enabled = true;
   Object.assign(actionMocks.actions, {
     isSubscribed: true,
@@ -156,7 +187,57 @@ beforeEach(() => {
   )) as typeof useAppStore);
 });
 
+afterEach(() => {
+  cleanup();
+  document.body.innerHTML = '';
+  actionMocks.releaseSheet.suspend = null;
+});
+
 describe('RepositoryCard view modes', () => {
+  it('follows the saved quick-action order and keeps hidden actions in the menu', async () => {
+    const user = userEvent.setup();
+    storeState.repositoryCardActions = [
+      { id: 'github', visible: true },
+      { id: 'ask', visible: false },
+      ...DEFAULT_REPOSITORY_CARD_ACTIONS.filter((item) => item.id !== 'github' && item.id !== 'ask'),
+    ];
+    renderRepositoryCard('grid', { onAskRepository: vi.fn() });
+
+    const actionRow = screen.getByTestId('grid-action-row');
+    expect(actionRow.firstElementChild).toHaveAttribute('title', '在GitHub上查看');
+    expect(screen.queryByRole('button', { name: '问答此仓库' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '更多仓库操作' }));
+    expect(screen.getByRole('menuitem', { name: '问答此仓库' })).toBeInTheDocument();
+  });
+
+  it('folds quick actions in preference order when the card is narrow', async () => {
+    const user = userEvent.setup();
+    storeState.repositoryCardActions = [
+      { id: 'edit', visible: true },
+      { id: 'github', visible: true },
+      { id: 'analyze', visible: true },
+      { id: 'ask', visible: true },
+      { id: 'releases', visible: true },
+      { id: 'subscribe', visible: true },
+      { id: 'docs', visible: true },
+    ];
+    renderRepositoryCard('grid', { onAskRepository: vi.fn() });
+    const actionRow = screen.getByTestId('grid-action-row');
+    Object.defineProperty(actionRow, 'clientWidth', { configurable: true, value: 190 });
+
+    await act(async () => {
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    expect(Array.from(actionRow.children).slice(0, 4).map((element) => element.getAttribute('title'))).toEqual([
+      '编辑仓库信息', '在GitHub上查看', 'AI分析此仓库', '问答此仓库',
+    ]);
+    await user.click(screen.getByRole('button', { name: '更多仓库操作' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent?.trim())).toEqual([
+      '查看 Release', '取消订阅 Release', '在 Zread 中查看', '取消 Star',
+    ]);
+  });
+
   it('keeps list actions on the same row as edit and only folds overflow into a more-actions menu', async () => {
     const user = userEvent.setup();
     renderRepositoryCard('list', { onAskRepository: vi.fn() });
@@ -184,7 +265,7 @@ describe('RepositoryCard view modes', () => {
       actionMocks.actions.vectorSearchAvailable = false;
       renderRepositoryCard('list');
 
-      expect(screen.queryByRole('button', { name: '更多仓库操作' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '更多仓库操作' })).toBeInTheDocument();
       expect(screen.queryByRole('menuitem', { name: '查找同类仓库' })).not.toBeInTheDocument();
       expect(screen.queryByText('查找同类')).not.toBeInTheDocument();
     } finally {
@@ -254,15 +335,55 @@ describe('RepositoryCard view modes', () => {
     expect(screen.getByTestId('repository-edit-modal')).toBeInTheDocument();
   });
 
-  it('delegates grid quick actions to the domain Hook without changing their presentation', async () => {
+  it('keeps Unstar at the bottom of the grid menu and delegates it to the domain Hook', async () => {
     const user = userEvent.setup();
     renderRepositoryCard('grid');
 
     await user.click(screen.getByTitle('AI分析此仓库'));
-    await user.click(screen.getByTitle('取消 Star'));
+    expect(screen.queryByTitle('取消 Star')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '更多仓库操作' }));
+    expect(screen.getAllByRole('menuitem').at(-1)).toHaveTextContent('取消 Star');
+    await user.click(screen.getByRole('menuitem', { name: '取消 Star' }));
 
     expect(actionMocks.actions.analyze).toHaveBeenCalledOnce();
     expect(actionMocks.actions.unstar).toHaveBeenCalledOnce();
+  });
+
+  it('does not show a separator above Unstar when it is the only grid menu item', async () => {
+    const user = userEvent.setup();
+    renderRepositoryCard('grid');
+
+    await user.click(screen.getByRole('button', { name: '更多仓库操作' }));
+    expect(screen.getAllByRole('menuitem')).toHaveLength(1);
+    expect(screen.queryByRole('separator')).not.toBeInTheDocument();
+  });
+
+  it('closes the grid action menu without opening README when card whitespace is clicked', async () => {
+    const user = userEvent.setup();
+    const { container } = renderRepositoryCard('grid');
+    const card = container.firstElementChild as HTMLElement;
+
+    await user.click(screen.getByRole('button', { name: '更多仓库操作' }));
+    expect(screen.getByRole('menuitem', { name: '取消 Star' })).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.pointerDown(card);
+      fireEvent.click(card);
+    });
+
+    await waitFor(() => expect(screen.queryByRole('menuitem', { name: '取消 Star' })).not.toBeInTheDocument());
+    expect(screen.queryByTestId('readme-modal')).not.toBeInTheDocument();
+  });
+
+  it('shows the customized edit tooltip in grid mode', () => {
+    render(
+      <DialogProvider>
+        <TooltipProvider>
+          <RepositoryCard repository={{ ...repository, custom_description: 'My summary' }} allCategories={[]} viewMode="grid" />
+        </TooltipProvider>
+      </DialogProvider>,
+    );
+
+    expect(screen.getByTitle('已自定义，编辑仓库信息')).toBeInTheDocument();
   });
 
   it('emits a repository-chat intent from both grid and list controls without invoking a service', async () => {
@@ -288,7 +409,7 @@ describe('RepositoryCard view modes', () => {
     expect(releaseButton.compareDocumentPosition(zreadLink) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(releaseButton);
-    expect(screen.getByTestId('repository-release-sheet')).toBeInTheDocument();
+    expect(await screen.findByTestId('repository-release-sheet')).toBeInTheDocument();
   });
 
   it('opens the release sheet from the list action menu without opening README', async () => {
@@ -310,12 +431,16 @@ describe('RepositoryCard view modes', () => {
     await user.click(screen.getByRole('button', { name: '查看 Release' }));
     expect(await screen.findByText('Loading releases…')).toBeInTheDocument();
 
+    const overlay = document.querySelector('.app-dialog-overlay') as HTMLElement;
     await act(async () => {
+      if (overlay) fireEvent.pointerDown(overlay);
       fireEvent.pointerDown(document.body);
+      fireEvent.pointerDown(card);
       fireEvent.click(card);
     });
 
     expect(screen.queryByTestId('readme-modal')).not.toBeInTheDocument();
+    actionMocks.releaseSheet.suspend = null;
   });
 
   it('does not open README when an outside click closes the edit modal', async () => {
@@ -334,10 +459,10 @@ describe('RepositoryCard view modes', () => {
     expect(screen.queryByTestId('readme-modal')).not.toBeInTheDocument();
   });
 
-  it('retains the existing quick action row in grid mode', () => {
+  it('retains the other quick actions in grid mode', () => {
     renderRepositoryCard('grid', { onAskRepository: vi.fn() });
 
-    expect(screen.queryByRole('button', { name: '更多仓库操作' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '更多仓库操作' })).toBeInTheDocument();
     expect(screen.getByTitle('AI分析此仓库')).toBeInTheDocument();
     expect(screen.getByTitle('问答此仓库')).toBeInTheDocument();
     expect(screen.getByTitle('取消订阅发布')).toBeInTheDocument();
@@ -348,6 +473,14 @@ describe('RepositoryCard view modes', () => {
 
     const footer = screen.getByText(/最近提交/).closest('.border-t');
     expect(footer?.parentElement).toHaveClass('mt-4');
+  });
+
+  it('hides the last-pushed text while the similar-repository status is active', () => {
+    actionMocks.actions.isFindingSimilar = true;
+    renderRepositoryCard('grid', { onAskRepository: vi.fn() });
+
+    expect(screen.getByTitle('查找相似仓库')).toHaveClass('opacity-100', 'pointer-events-auto');
+    expect(screen.getByText(/最近提交/)).toHaveClass('invisible');
   });
 
   it('collapses trailing grid actions into a more-actions menu when the card is narrow', async () => {
@@ -406,6 +539,55 @@ describe('RepositoryCard view modes', () => {
 
     expect(screen.getByRole('button', { name: '更多仓库操作' })).toBeInTheDocument();
     expect(screen.queryByTitle('取消 Star')).not.toBeInTheDocument();
+  });
+
+  it('keeps the plugin page dialog after the card menu closes', async () => {
+    const user = userEvent.setup();
+    pluginClientMocks.list.mockResolvedValue({
+      plugins: [{
+        directoryName: 'repo-info-card',
+        manifest: {
+          manifestVersion: 1,
+          id: 'com.githubstarsmanager.repo-info-card',
+          name: '仓库信息卡',
+          version: '0.1.0',
+          apiVersion: '1',
+          permissions: ['repositories:read'],
+          contributes: {
+            repositoryActions: [{
+              id: 'generate-info-card',
+              title: '生成仓库信息卡',
+              placement: 'repository-card',
+              opensPage: 'info-card',
+            }],
+            pages: [{ id: 'info-card', title: 'Repository Info Card', entry: 'ui/index.html' }],
+          },
+        },
+        enabled: true,
+        status: 'active',
+        grantedPermissions: ['repositories:read'],
+      }],
+      invalidPlugins: [],
+    });
+    const { unmount } = render(
+      <DialogProvider>
+        <TooltipProvider>
+          <RepositoryCard repository={repository} allCategories={[]} viewMode="list" />
+          <PluginPageHost />
+        </TooltipProvider>
+      </DialogProvider>,
+    );
+    await user.click(screen.getByRole('button', { name: '更多仓库操作' }));
+    await user.click(await screen.findByRole('menuitem', { name: '生成仓库信息卡' }));
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    expect(await screen.findByRole('dialog', { name: '生成仓库信息卡' })).toBeInTheDocument();
+
+    // 弹窗挂在应用根上：卡片卸载后它仍然在。
+    unmount();
+    render(<PluginPageHost />);
+    expect(screen.getByRole('dialog', { name: '生成仓库信息卡' })).toBeInTheDocument();
   });
 });
 

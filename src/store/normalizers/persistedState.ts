@@ -14,8 +14,11 @@ import { normalizeAssetFilters } from '../../utils/assetFilters';
 import { normalizeThemeTokens } from '../../utils/themeTokens';
 import { normalizeTrendingSnapshots } from '../../utils/trendingSnapshots';
 import { normalizeRepositoryCardFields } from '../../utils/repositoryCardFields';
+import { normalizeRepositoryCardActions } from '../../utils/repositoryCardActions';
 import { normalizeXTweetAuth, normalizeXTweetFollows } from '../../utils/xTweetFollows';
 import { normalizeTelegramFollows } from '../../utils/telegramFollows';
+import { normalizeExternalDiscoveryChannels } from '../../utils/discoveryFeeds';
+import { isChannelScrapable, isScrapeSupportSettled } from '../../services/scrapeSupport';
 import type { AppStoreState } from '../types';
 import { normalizeAccountWorkspaces } from '../helpers/accountWorkspace';
 import { readAuthMirror } from '../persistence/authStorage';
@@ -38,9 +41,8 @@ export const normalizePersistedState = (
   currentState: AppStoreState
 ): Partial<AppStoreState> => {
   const safePersisted = persisted ?? {};
-  const defaultDiscoveryChannelIds = new Set(defaultDiscoveryChannels.map((channel) => channel.id));
   const persistedDiscoveryChannels = (safePersisted as Record<string, unknown>).discoveryChannels;
-  const normalizedDiscoveryChannels = defaultDiscoveryChannels.map((defaultChannel) => {
+  const normalizedDiscoveryChannels = [...defaultDiscoveryChannels.map((defaultChannel) => {
     const persistedChannel = Array.isArray(persistedDiscoveryChannels)
       ? persistedDiscoveryChannels.find((channel: unknown) =>
           (channel as Record<string, unknown>)?.id === defaultChannel.id
@@ -50,8 +52,11 @@ export const normalizePersistedState = (
       ...defaultChannel,
       enabled: persistedChannel?.enabled !== false,
     };
-  });
-  if (!normalizedDiscoveryChannels.some(channel => channel.enabled)) {
+  }), ...normalizeExternalDiscoveryChannels(persistedDiscoveryChannels)];
+  // 抓取支持结论未落定（Web 启动探测中）时不做可见性决策，完整保留持久化的
+  // 启用标志，避免误启用「趋势」并被后续持久化写入固化（桌面端恒定已落定）
+  const scrapeSupportSettled = isScrapeSupportSettled();
+  if (scrapeSupportSettled && !normalizedDiscoveryChannels.some(channel => channel.enabled && isChannelScrapable(channel.id))) {
     normalizedDiscoveryChannels[0] = { ...normalizedDiscoveryChannels[0], enabled: true };
   }
   const authMirror = readAuthMirror();
@@ -73,23 +78,40 @@ export const normalizePersistedState = (
   const starredGists = Array.isArray(safePersisted.starredGists) ? safePersisted.starredGists : [];
   const releases = Array.isArray(safePersisted.releases) ? safePersisted.releases : [];
 
-  // Migration for old users: mark repos with existing releases as already synced
-  const migratedRepositories = repositories.map(repo => {
-    const hasExistingRelease = releases.some(r => r.repository?.id === repo.id);
-    if (hasExistingRelease && !repo.has_fetched_releases) {
+  // Migration for old users: mark repos with existing releases as already synced.
+  // 引用保留：无需回填时直接返回原数组——分片持久化按引用判脏，若 hydration
+  // 总是产生新数组引用，会在每次启动后触发一次全量重写。
+  // 用 String(id) 建索引：历史快照里 id 可能被持久化为字符串，与旧实现的
+  // `===` 宽松匹配历史数据保持等价；单次遍历建 Map，回填整体 O(R+L)。
+  const latestReleaseTimeByRepoId = new Map<string, number>();
+  for (const release of releases) {
+    const repoId = release.repository?.id;
+    if (repoId === undefined || repoId === null) continue;
+    const key = String(repoId);
+    const publishedTime = new Date(release.published_at).getTime();
+    const previous = latestReleaseTimeByRepoId.get(key);
+    latestReleaseTimeByRepoId.set(key, previous === undefined ? publishedTime : Math.max(previous, publishedTime));
+  }
+  const needsReleaseBackfill = repositories.some(
+    repo => latestReleaseTimeByRepoId.has(String(repo.id)) && !repo.has_fetched_releases,
+  );
+  const migratedRepositories = needsReleaseBackfill
+    ? repositories.map(repo => {
+      if (repo.has_fetched_releases) {
+        return repo;
+      }
       // Backfill last_release_fetch_time from the latest persisted release timestamp
-      const repoReleases = releases.filter(r => r.repository?.id === repo.id);
-      const latestReleaseTime = repoReleases.length > 0
-        ? Math.max(...repoReleases.map(r => new Date(r.published_at).getTime()))
-        : null;
+      const latestReleaseTime = latestReleaseTimeByRepoId.get(String(repo.id));
+      if (latestReleaseTime === undefined) {
+        return repo;
+      }
       return {
         ...repo,
         has_fetched_releases: true,
         last_release_fetch_time: repo.last_release_fetch_time || (latestReleaseTime ? new Date(latestReleaseTime).toISOString() : new Date().toISOString())
       };
-    }
-    return repo;
-  });
+    })
+    : repositories;
 
   // Default includePreRelease to true if not set (backward compatibility)
   const includePreRelease = safePersisted.includePreRelease !== undefined
@@ -200,6 +222,7 @@ export const normalizePersistedState = (
     trendingSnapshots: normalizeTrendingSnapshots((safePersisted as Record<string, unknown>).trendingSnapshots),
     // 卡片可见字段（开发守则 §14）：逐项校验，非法值按默认（显示）处理
     repositoryCardFields: normalizeRepositoryCardFields((safePersisted as Record<string, unknown>).repositoryCardFields),
+    repositoryCardActions: normalizeRepositoryCardActions((safePersisted as Record<string, unknown>).repositoryCardActions),
     language: isAppLanguage(safePersisted.language) ? safePersisted.language : currentState.language,
     translationEngine: safePersisted.translationEngine === 'google' || safePersisted.translationEngine === 'ai'
       ? safePersisted.translationEngine
@@ -219,10 +242,12 @@ export const normalizePersistedState = (
     discoveryRepos: { 'trending': [], 'hot-release': [], 'most-popular': [], 'topic': [], 'x-tweet': [], 'telegram': [], 'weekly': [], 'search': [], 'code-search': [] } as Record<DiscoveryChannelId, DiscoveryRepo[]>,
     discoveryLastRefresh: { 'trending': null, 'hot-release': null, 'most-popular': null, 'topic': null, 'x-tweet': null, 'telegram': null, 'weekly': null, 'search': null, 'code-search': null },
     discoveryTotalCount: { 'trending': 0, 'hot-release': 0, 'most-popular': 0, 'topic': 0, 'x-tweet': 0, 'telegram': 0, 'weekly': 0, 'search': 0, 'code-search': 0 },
-    selectedDiscoveryChannel: defaultDiscoveryChannelIds.has(safePersisted.selectedDiscoveryChannel as DiscoveryChannelId)
-      && normalizedDiscoveryChannels.some(channel => channel.id === safePersisted.selectedDiscoveryChannel && channel.enabled)
+    // 选中频道保留持久化值（存在且启用即可；未落定时 Visibility 判定延后，
+    // 由 DiscoveryView 在抓取支持结论落定后再纠偏，避免 Web+后端用户启动探测
+    // 未完成时丢失选择）
+    selectedDiscoveryChannel: normalizedDiscoveryChannels.some(channel => channel.id === safePersisted.selectedDiscoveryChannel && channel.enabled && (!scrapeSupportSettled || isChannelScrapable(channel.id)))
       ? safePersisted.selectedDiscoveryChannel as DiscoveryChannelId
-      : normalizedDiscoveryChannels.find(channel => channel.enabled)?.id ?? defaultDiscoveryChannels[0].id,
+      : normalizedDiscoveryChannels.find(channel => channel.enabled && (!scrapeSupportSettled || isChannelScrapable(channel.id)))?.id ?? defaultDiscoveryChannels[0].id,
     // discoveryIsLoading 不持久化，始终重置为 false（防止旧数据格式异常）
     discoveryIsLoading: { 'trending': false, 'hot-release': false, 'most-popular': false, 'topic': false, 'x-tweet': false, 'telegram': false, 'weekly': false, 'search': false, 'code-search': false },
     discoveryIsLoadingMore: { 'trending': false, 'hot-release': false, 'most-popular': false, 'topic': false, 'x-tweet': false, 'telegram': false, 'weekly': false, 'search': false, 'code-search': false },

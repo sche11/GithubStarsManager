@@ -1,11 +1,35 @@
 {
+  "externalFeeds": {
+    "manage": "External discovery feeds",
+    "manageRss": "Add RSS discovery feed",
+    "name": "Channel name",
+    "url": "HTTPS feed URL",
+    "add": "Add feed",
+    "checking": "Checking feed…",
+    "copy": "Copy",
+    "copied": "Copied",
+    "rssFormat": "Paste a public RSS or Atom feed URL — the app extracts GitHub repository links mentioned in it (first 30 per refresh).",
+    "rss-invalid": "No GitHub repository links were found in the feed.",
+    "remove": "Remove {{name}}",
+    "format": "Paste a public HTTPS link whose JSON response lists GitHub repositories in its repositories array — up to 30 public repositories.",
+    "cors-note": "The site must allow browser requests (CORS). No GitHub token is sent to the feed.",
+    "invalid": "Enter a name and a valid HTTPS feed URL.",
+    "duplicate": "This feed is already added, or the ten-feed limit was reached.",
+    "invalid-format": "The feed JSON does not contain a valid repository list.",
+    "cors": "The feed could not be read. Check its URL and CORS settings.",
+    "unreadable": "The feed could not be read. Check its URL, availability, and JSON format."
+  },
   "discoverySidebar": {
     "just-now": "Just now",
     "m-ago": "m ago",
     "h-ago": "h ago",
+    "discovery-label": "Discovery",
     "discovery-channels": "Discovery Channels",
     "manage-channels": "Manage discovery channels",
-    "refresh-all": "Refresh All"
+    "refresh-all": "Refresh All",
+    "channels-section": "Channels",
+    "sources-section": "Sources",
+    "channel-count": "{{count}} items"
   },
   "discoveryView": {
     "all-loaded": "All loaded",
@@ -80,7 +104,21 @@
     "retry": "Retry",
     "platform-filter-v1": "Platform filter: {{v1}}",
     "items-count": "{{currentCount}} items",
-    "items-count-with-total": "{{currentCount}} of {{totalCount}} items"
+    "items-count-with-total": "{{currentCount}} of {{totalCount}} items",
+    "search-mode": "Search mode",
+    "search-mode-keyword": "Keywords",
+    "search-mode-semantic": "AI Semantic",
+    "search-mode-semantic-placeholder": "Describe the repository you want in natural language, e.g.: a CLI tool for managing Markdown notes",
+    "search-mode-hint": "AI semantic search finds repositories by matching public code across the web (GitHub repositories only) and requires a configured AI service",
+    "search-phase-expanding": "AI is analyzing your query…",
+    "search-phase-recalling": "Recalling repositories from the web…",
+    "search-phase-enriching": "Enriching repository details…",
+    "search-phase-reranking": "AI is ranking the best matches…",
+    "semantic-rate-limited": "Code search rate limit hit (429), please try again later",
+    "semantic-no-ai-config": "No AI service configured, fell back to keyword search",
+    "semantic-fallback-toast": "AI selection failed, results ordered by lexical matches",
+    "semantic-empty-recall": "No matching repositories found in public code, try more specific technical keywords",
+    "semantic-empty-ai": "AI found no relevant repositories, try rephrasing or adding technical keywords"
   },
   "weeklyIssueModal": {
     "submission-v1": "Submission #{{v1}}",
@@ -150,5 +188,4 @@
     "stars-gained": "+{{v1}} stars since we first recorded it",
     "first-seen": "Top entry first recorded {{v1}}"
   }
-
 }

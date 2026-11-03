@@ -144,14 +144,58 @@ test('installs and serves the V1.2 page-only example without starting a Worker',
     pluginsRoot: path.join(workspace, 'plugins'),
     statePath: path.join(workspace, 'plugins-state.json'),
   });
-  const source = path.resolve(__dirname, '../../examples/plugins/repo-health-page');
-  const pluginId = 'com.example.repo-health-page';
+  const source = path.resolve(__dirname, '../../examples/plugins/repo-insights');
+  const pluginId = 'com.githubstarsmanager.repo-insights';
   assert.deepEqual(manager.installFromDirectory(source), { success: true, pluginId });
-  assert.deepEqual(await manager.enable(pluginId, ['repositories:read']), { success: true });
-  const page = manager.getPage(pluginId, 'dashboard');
+  assert.deepEqual(
+    await manager.enable(pluginId, ['repositories:read', 'network:api.github.com', 'storage', 'ai:invoke']),
+    { success: true }
+  );
+  const page = manager.getPage(pluginId, 'insights');
   assert.equal(page.success, true);
-  assert.match(manager.readPageResource(page.url).body.toString(), /Repository Health/);
+  assert.match(manager.readPageResource(page.url).body.toString(), /Repository Insights/);
   assert.match(manager.readPageResource(page.url.replace('index.html', 'index.js')).body.toString(), /repositories\.search/);
   await manager.disable(pluginId);
   assert.equal(manager.readPageResource(page.url), null);
+});
+
+test('installs the V1.4 modal-action example and serves its opensPage without a Worker', async (t) => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-plugin-modal-e2e-'));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  const calls = [];
+  const manager = createPluginManager({
+    pluginsRoot: path.join(workspace, 'plugins'),
+    statePath: path.join(workspace, 'plugins-state.json'),
+    hostOperations: {
+      clipboardWrite: (args) => { calls.push(['write', args]); return null; },
+      clipboardWriteImage: () => null,
+      saveFile: async (args) => ({ fileName: args.fileName }),
+    },
+  });
+  const source = path.resolve(__dirname, '../../examples/plugins/repo-info-card');
+  const pluginId = 'com.githubstarsmanager.repo-info-card';
+  assert.deepEqual(manager.installFromDirectory(source), { success: true, pluginId });
+  assert.deepEqual(
+    await manager.enable(pluginId, ['repositories:read', 'ai:invoke', 'clipboard:write', 'downloads:create']),
+    { success: true }
+  );
+  // opensPage 动作不启动 Worker，宿主通过 getPage 弹出页面。
+  const page = manager.getPage(pluginId, 'info-card');
+  assert.equal(page.success, true);
+  assert.match(manager.readPageResource(page.url).body.toString(), /Repository Info Card/);
+  assert.match(manager.readPageResource(page.url.replace('index.html', 'index.js')).body.toString(), /ai\.generate/);
+
+  // 页面 Bridge 新增的输出方法按权限放行并解码载荷。
+  const saved = await manager.requestPageCapability({
+    pluginId, pageId: 'info-card', method: 'downloads.saveFile',
+    args: { fileName: 'project-info-card-1x1.png', dataBase64: Buffer.from('png').toString('base64') },
+  });
+  assert.deepEqual(saved, { success: true, value: { fileName: 'project-info-card-1x1.png' } });
+  const copied = await manager.requestPageCapability({
+    pluginId, pageId: 'info-card', method: 'clipboard.write',
+    args: { text: '<!doctype html>' },
+  });
+  assert.deepEqual(copied, { success: true, value: null });
+  assert.deepEqual(calls, [['write', { text: '<!doctype html>' }]]);
+  await manager.disable(pluginId);
 });

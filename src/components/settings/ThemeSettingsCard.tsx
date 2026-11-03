@@ -23,6 +23,7 @@ import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '../ui/accordion';
 import { REPOSITORY_CARD_FIELD_IDS } from '../../types/repositoryCardFields';
 import { isRepositoryCardFieldVisible } from '../../utils/repositoryCardFields';
+import { RepositoryCardActionsSettings } from './RepositoryCardActionsSettings';
 
 interface ThemeSettingsCardProps {
   t: TranslateFn;
@@ -154,7 +155,7 @@ export const ThemeSettingsCard: React.FC<ThemeSettingsCardProps> = ({ t }) => {
                   tabIndex={isActive ? 0 : -1}
                   data-theme-preset-id={preset.id}
                   onClick={() => setThemePreset(preset.id as ThemePresetId)}
-                  className={`group relative flex flex-col items-center gap-2 rounded-lg border p-2.5 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                  className={`group relative flex flex-col items-center gap-2 rounded-lg border p-2.5 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--ui-focus-ring) focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                     isActive
                       ? 'border-primary ring-2 ring-primary/30'
                       : 'border-border hover:border-primary/40'
@@ -308,6 +309,14 @@ export const ThemeSettingsCard: React.FC<ThemeSettingsCardProps> = ({ t }) => {
                 onClick={() => setRepositoryCardField(id, !visible)}
                 className={visible ? 'border-primary bg-primary/10 text-primary hover:bg-primary/15' : ''}
               >
+                <span
+                  aria-hidden="true"
+                  className={visible
+                    ? 'flex h-4 w-4 items-center justify-center rounded-sm bg-primary text-primary-foreground'
+                    : 'flex h-4 w-4 items-center justify-center rounded-sm border border-border text-transparent'}
+                >
+                  <Check className="h-3 w-3" />
+                </span>
                 {t(`themeSettingsCard.card-field-${id}`)}
               </Button>
             );
@@ -315,6 +324,14 @@ export const ThemeSettingsCard: React.FC<ThemeSettingsCardProps> = ({ t }) => {
         </div>
       </CardContent>
     </Card>
+    <RepositoryCardActionsSettings
+      title={t('themeSettingsCard.card-actions')}
+      hint={t('themeSettingsCard.card-actions-hint')}
+      resetLabel={t('themeSettingsCard.reset-card-actions')}
+      moveUpLabel={(action) => t('menuManagementPanel.move-v1-up', { v1: action })}
+      moveDownLabel={(action) => t('menuManagementPanel.move-v1-down', { v1: action })}
+      visibilityLabel={(action) => t('themeSettingsCard.quick-action-visibility', { action })}
+    />
     </>
   );
 };

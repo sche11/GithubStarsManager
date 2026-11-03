@@ -1,5 +1,15 @@
 import '@testing-library/jest-dom';
+import type { TestingLibraryMatchers } from '@testing-library/jest-dom/matchers';
 import { vi } from 'vitest';
+
+declare module 'vitest' {
+  /* eslint-disable @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any */
+  interface Matchers<
+    R extends void | Promise<void> = void | Promise<void>,
+    T = unknown,
+  > extends TestingLibraryMatchers<any, R> {}
+  /* eslint-enable @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any */
+}
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -127,3 +137,11 @@ for (const language of readdirSync(localesDir)) {
     );
   }
 }
+
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+
+afterEach(() => {
+  cleanup();
+  document.body.innerHTML = '';
+});

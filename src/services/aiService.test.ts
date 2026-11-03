@@ -3,6 +3,7 @@ import type { Repository } from '../types';
 import {
   AIService,
   AIRequestError,
+  isAbortError,
   isRateLimitedError,
   getRetryAfterMsFromError,
   isAIToolCallUnsupportedError,
@@ -210,8 +211,8 @@ describe('AIService.searchRepositoriesWithSelection — LLM 精选', () => {
     expect(selectionPrompt).toContain('用户意图说明：找 markdown 编辑器');
     expect(selectionPrompt).toContain('共 2 个');
     expect(selectionPrompt).toContain('acme/quick-md');
-    // 普通模型的精选请求维持紧凑预算
-    expect(requests[1].max_tokens).toBe(800);
+    // 精选请求统一给足预算，避免自定义推理模型把 800 全耗在 reasoning 上
+    expect(requests[1].max_tokens).toBe(4096);
   });
 
   it('模型把候选行号当作 ID 返回时按行号解析，重排结果不被静默丢弃', async () => {
@@ -515,5 +516,803 @@ describe('AIService.analyzeRepository language following', () => {
     expect(joined).not.toContain('A concise English overview');
     expect(joined).not.toContain('"summary": "English overview"');
     expect(joined).toContain('Write ALL user-facing output in Japanese (日本語)');
+  });
+});
+
+describe('AIService.expandSearchQuery — 查询扩展公开方法', () => {
+  const fetchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const chatResponse = (content: string) => fetchJson({ choices: [{ message: { content } }] });
+  const mockFetch = () => {
+    const fetchMock = window.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockReset();
+    return fetchMock;
+  };
+  const captureBody = async (init?: RequestInit) => JSON.parse(String(init?.body)) as Record<string, unknown>;
+
+  it('解析模型返回的意图与关键词（keywords/categories/synonyms 合并去重）', async () => {
+    const fetchMock = mockFetch();
+    const requests: Array<Record<string, unknown>> = [];
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      requests.push(await captureBody(init));
+      return chatResponse('{"intent":"找 markdown 编辑器","keywords":["markdown","editor"],"categories":["cli"],"synonyms":["md","markdown"]}');
+    });
+
+    const service = new AIService(makeConfig() as never, 'zh');
+    const result = await service.expandSearchQuery('markdown 编辑器');
+
+    expect(result.intent).toBe('找 markdown 编辑器');
+    expect(result.terms).toEqual(['markdown', 'editor', 'cli', 'md']);
+    // 请求形态与既有扩展阶段一致：思考预算 2000、低温
+    expect(requests[0].max_tokens).toBe(2000);
+    expect(requests[0].temperature).toBe(0.1);
+  });
+
+  it('模型返回空内容时 requestText 抛错（与既有扩展阶段行为一致）', async () => {
+    const fetchMock = mockFetch();
+    fetchMock.mockImplementationOnce(async () => chatResponse(''));
+
+    const service = new AIService(makeConfig() as never, 'zh');
+    // requestText 对空 content 统一抛错，扩展阶段（重构前后）同样不会拿到空结果
+    await expect(service.expandSearchQuery('anything')).rejects.toThrow('No content received from AI service');
+  });
+});
+
+describe('AIService.selectRelevantRepositories — evidence 证据行', () => {
+  const fetchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const chatResponse = (content: string) => fetchJson({ choices: [{ message: { content } }] });
+  const mockFetch = () => {
+    const fetchMock = window.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockReset();
+    return fetchMock;
+  };
+  const captureBody = async (init?: RequestInit) => JSON.parse(String(init?.body)) as Record<string, unknown>;
+
+  it('不传 evidence 时精选提示词与 searchRepositoriesWithSelection 逐字节一致；传 evidence（全网发现）切换宽松排序提示词并追加证据行', async () => {
+    const repoA = makeRepo({ id: 910000001, name: 'md-tool', full_name: 'acme/md-tool', description: 'a markdown tool' });
+    const repoB = makeRepo({ id: 910000002, name: 'other', full_name: 'acme/other', description: 'unrelated' });
+    const query = 'markdown 编辑器';
+    const intent = '找 markdown 编辑器';
+
+    // 基线：完整三段式搜索的第二次请求（精选）提示词
+    const fetchMock = mockFetch();
+    let baselinePrompt = '';
+    fetchMock.mockImplementationOnce(async () => chatResponse(`{"intent":"${intent}","keywords":[],"synonyms":[]}`));
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = await captureBody(init);
+      baselinePrompt = String((body.messages as Array<{ content: string }>)[1].content);
+      return chatResponse('[]');
+    });
+    const pipelineService = new AIService(makeConfig() as never, 'zh');
+    await pipelineService.searchRepositoriesWithSelection([repoA, repoB], query);
+
+    // 直调（无 evidence）：与基线逐字节一致
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = await captureBody(init);
+      const directPrompt = String((body.messages as Array<{ content: string }>)[1].content);
+      expect(directPrompt).toBe(baselinePrompt);
+      return chatResponse('[]');
+    });
+    const service = new AIService(makeConfig() as never, 'zh');
+    await service.selectRelevantRepositories([repoA, repoB], query, intent);
+    expect(baselinePrompt).not.toBe('');
+    expect(baselinePrompt).not.toContain('matches=');
+
+    // 传 evidence（全网发现路径）：提示词切换为宽松排序模式 + 证据行追加
+    let evidenceSystem = '';
+    let evidencePrompt = '';
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = await captureBody(init);
+      evidenceSystem = String((body.messages as Array<{ content: string }>)[0].content);
+      evidencePrompt = String((body.messages as Array<{ content: string }>)[1].content);
+      return chatResponse('[]');
+    });
+    const evidence = new Map<string, string>([
+      ['acme/md-tool', 'matches=5; paths=README.md,package.json; langs=TypeScript'],
+    ]);
+    await service.selectRelevantRepositories([repoA, repoB], query, intent, undefined, evidence);
+    // 证据行出现在 md-tool 摘要块的末尾（meta 行之后、块间距之前）
+    expect(evidencePrompt).toContain('   matches=5; paths=README.md,package.json; langs=TypeScript');
+    const evidenceLine = '   matches=5; paths=README.md,package.json; langs=TypeScript';
+    const mdBlockEnd = evidencePrompt.indexOf(evidenceLine);
+    const metaLine = evidencePrompt.indexOf('acme/md-tool');
+    expect(metaLine).toBeGreaterThan(-1);
+    expect(mdBlockEnd).toBeGreaterThan(metaLine);
+    // 无证据的仓库不受影响
+    expect(evidencePrompt).toContain('acme/other');
+    // 全网发现提示词不再含过滤式"凑数即判空"措辞（实测会让 flash 模型在噪声
+    // 候选池上塌缩到空数组），改为"选最相关、忽略无关、仅当全部候选无关才判空"
+    expect(evidencePrompt).not.toContain('凑数');
+    expect(evidencePrompt).toContain('不要因为候选池中多数仓库无关就返回空数组');
+    expect(evidenceSystem).not.toContain('返回空数组');
+  });
+
+  it('en 语言下 evidence 路径同样切换为宽松排序提示词', async () => {
+    const repoA = makeRepo({ id: 910000001, name: 'md-tool', full_name: 'acme/md-tool', description: 'a markdown tool' });
+    const fetchMock = mockFetch();
+    let enSystem = '';
+    let enPrompt = '';
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = await captureBody(init);
+      enSystem = String((body.messages as Array<{ content: string }>)[0].content);
+      enPrompt = String((body.messages as Array<{ content: string }>)[1].content);
+      return chatResponse('[]');
+    });
+    const enService = new AIService(makeConfig() as never, 'en');
+    await enService.selectRelevantRepositories(
+      [repoA],
+      'markdown editor',
+      '',
+      undefined,
+      new Map([['acme/md-tool', 'matches=1; paths=README.md; langs=']]),
+    );
+    expect(enPrompt).not.toContain('loosely related');
+    expect(enPrompt).toContain('never return [] just because most candidates are irrelevant');
+    expect(enSystem).not.toContain('return an empty array');
+  });
+});
+
+describe('AIService.expandSearchQuery — 多语言关键词约束（multilingual）', () => {
+  const fetchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const chatResponse = (content: string) => fetchJson({ choices: [{ message: { content } }] });
+  const mockFetch = () => {
+    const fetchMock = window.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockReset();
+    return fetchMock;
+  };
+  const captureBody = async (init?: RequestInit) => JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+
+  it('multilingual: true 时用户提示词追加双语约束；默认调用不追加（仓库页提示词逐字节不变）', async () => {
+    const fetchMock = mockFetch();
+    const requests: Array<string> = [];
+    fetchMock.mockImplementation(async (_url, init) => {
+      requests.push(String((await captureBody(init)).messages[1].content));
+      return chatResponse('{"intent":"i","keywords":["k"],"synonyms":[]}');
+    });
+
+    const service = new AIService(makeConfig() as never, 'zh');
+    await service.expandSearchQuery('markdown 编辑器', undefined);
+    await service.expandSearchQuery('markdown 编辑器', undefined, { multilingual: true });
+
+    // 默认路径：无追加段（与 createSearchPrompt 原文一致）
+    expect(requests[0]).not.toContain('补充约束');
+    // 多语言路径：追加双语约束（原语言 + 英文，英文查询补中文）
+    expect(requests[1]).toContain('补充约束');
+    expect(requests[1]).toContain('查询原语言与英文');
+    // 追加段在原提示词之后，且原文完整保留
+    expect(requests[1].startsWith(requests[0])).toBe(true);
+    expect(requests[1].length).toBeGreaterThan(requests[0].length);
+  });
+});
+
+describe('AIService.generateRepoSearchQueries — GitHub 语法槽', () => {
+  const fetchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const chatResponse = (content: string) => fetchJson({ choices: [{ message: { content } }] });
+  const mockFetch = () => {
+    const fetchMock = window.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockReset();
+    return fetchMock;
+  };
+  const captureBody = async (init?: RequestInit) => JSON.parse(String(init?.body)) as {
+    messages: Array<{ content: string }>;
+    temperature: number;
+    max_tokens: number;
+  };
+
+  it('从垃圾文本中提取 JSON 对象，过滤非法条目且不提前截断', async () => {
+    const fetchMock = mockFetch();
+    let body: Awaited<ReturnType<typeof captureBody>> | undefined;
+    const content = [
+      'noise before',
+      JSON.stringify({
+        queries: [
+          { terms: ['terminal', 'file manager'], scope: 'metadata' },
+          { terms: ['password vault'], scope: 'readme' },
+          { terms: ['todo task'], scope: 'any' },
+          { terms: ['code review'], scope: 'METADATA' },
+          { terms: ['photo backup'], scope: 'readme' },
+          { terms: ['sixth query'], scope: 'any' },
+          { terms: 'not-an-array', scope: 'metadata' },
+          { terms: ['bad scope'], scope: 'topic' },
+          { terms: [], scope: 'any' },
+        ],
+      }),
+      'noise after',
+    ].join('\n');
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      body = await captureBody(init);
+      return chatResponse(content);
+    });
+
+    const result = await new AIService(makeConfig() as never, 'zh')
+      .generateRepoSearchQueries('终端文件管理器', '找终端文件管理器');
+
+    expect(result).toEqual([
+      { terms: ['terminal', 'file manager'], scope: 'metadata' },
+      { terms: ['password vault'], scope: 'readme' },
+      { terms: ['todo task'], scope: 'any' },
+      { terms: ['code review'], scope: 'metadata' },
+      { terms: ['photo backup'], scope: 'readme' },
+      { terms: ['sixth query'], scope: 'any' },
+    ]);
+    expect(body?.temperature).toBe(0.1);
+    expect(body?.max_tokens).toBe(4096);
+    const userPrompt = body?.messages[1].content ?? '';
+    expect(userPrompt).toContain('至少 2 条 metadata');
+    expect(userPrompt).toContain('至少 1 条 readme');
+    expect(userPrompt).toContain('禁止只写泛词');
+  });
+
+  it('跳过提示词示例对象，选择首个含有效查询的 JSON 对象', async () => {
+    const fetchMock = mockFetch();
+    const content = [
+      JSON.stringify({ queries: [{ terms: ['example term'], scope: 'metadata | readme | any' }] }),
+      JSON.stringify({ queries: [{ terms: ['terminal manager'], scope: 'metadata' }] }),
+    ].join('\n');
+    fetchMock.mockResolvedValueOnce(chatResponse(content));
+
+    await expect(new AIService(makeConfig() as never, 'zh').generateRepoSearchQueries('终端文件管理器', 'i'))
+      .resolves.toEqual([{ terms: ['terminal manager'], scope: 'metadata' }]);
+  });
+
+  it('未闭合的散落 { 不会吞掉后面的完整查询对象', async () => {
+    const fetchMock = mockFetch();
+    const content = `{ stray\n${JSON.stringify({ queries: [{ terms: ['terminal manager'], scope: 'metadata' }] })}`;
+    fetchMock.mockResolvedValueOnce(chatResponse(content));
+
+    await expect(new AIService(makeConfig() as never, 'zh').generateRepoSearchQueries('q', 'i'))
+      .resolves.toEqual([{ terms: ['terminal manager'], scope: 'metadata' }]);
+  });
+
+  it.each([
+    ['普通端点', makeConfig()],
+    ['reasoning 兼容端点', { ...makeConfig(), reasoningEffort: 'medium' }],
+  ])('%s统一使用 4096 max_tokens', async (_label, config) => {
+    const fetchMock = mockFetch();
+    let maxTokens: number | undefined;
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      maxTokens = (await captureBody(init)).max_tokens;
+      return chatResponse('{"queries":[{"terms":["x"],"scope":"any"}]}');
+    });
+
+    await new AIService(config as never, 'zh').generateRepoSearchQueries('q', 'i');
+    expect(maxTokens).toBe(4096);
+  });
+
+  it('非数组、非法 JSON 或请求失败时返回 []', async () => {
+    const fetchMock = mockFetch();
+    fetchMock
+      .mockResolvedValueOnce(chatResponse('{"queries":"not-an-array"}'))
+      .mockResolvedValueOnce(chatResponse('not json at all'))
+      .mockRejectedValueOnce(new Error('network down'));
+    const service = new AIService(makeConfig() as never, 'zh');
+
+    await expect(service.generateRepoSearchQueries('q', 'i')).resolves.toEqual([]);
+    await expect(service.generateRepoSearchQueries('q', 'i')).resolves.toEqual([]);
+    await expect(service.generateRepoSearchQueries('q', 'i')).resolves.toEqual([]);
+  });
+
+  it('abort 向上传播；en 提示词包含同等语法槽约束', async () => {
+    const fetchMock = mockFetch();
+    fetchMock.mockRejectedValueOnce(new DOMException('aborted', 'AbortError'));
+    const service = new AIService(makeConfig() as never, 'zh');
+    await expect(service.generateRepoSearchQueries('q', 'i')).rejects.toSatisfy(isAbortError);
+
+    let enPrompt = '';
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = await captureBody(init);
+      enPrompt = body.messages[1].content;
+      return chatResponse('{"queries":[{"terms":["x"],"scope":"any"}]}');
+    });
+    await new AIService(makeConfig() as never, 'en').generateRepoSearchQueries('q', 'i');
+    expect(enPrompt).toContain('At least 2 metadata queries');
+    expect(enPrompt).toContain('at least 1 readme query');
+    expect(enPrompt).toContain('never use only generic words');
+  });
+});
+
+describe('AIService vector query analysis and graded reranking', () => {
+  const fetchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const chatResponse = (content: string) => fetchJson({ choices: [{ message: { content } }] });
+
+  beforeEach(() => {
+    (window.fetch as ReturnType<typeof vi.fn>).mockReset();
+  });
+
+  it('parses strict JSON query analysis and truncates overlong fields', async () => {
+    (window.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(chatResponse(`\`\`\`json
+{
+  "intent": "${'i'.repeat(250)}",
+  "keywords": [" Skill ", "skill", "README", "", "readme"],
+  "idealDescription": "${'d'.repeat(650)}",
+  "facets": {
+    "artifact": ["skill"],
+    "action": ["optimize"],
+    "domain": ["github readme"],
+    "platform": ["codex"]
+  },
+  "highPrecisionTerms": ["README", "skill"],
+  "lowConfidenceFacets": []
+}
+\`\`\``));
+    const result = await new AIService(makeConfig() as never, 'zh').analyzeVectorSearchQuery('优化 readme');
+
+    expect(result?.intent).toHaveLength(200);
+    expect(result?.idealDescription).toHaveLength(600);
+    expect(result?.keywords).toEqual(['skill', 'readme']);
+    expect(result?.facets.artifact).toEqual(['skill']);
+  });
+
+  it('returns null for malformed analysis or wrong field types', async () => {
+    const fetch = window.fetch as ReturnType<typeof vi.fn>;
+    fetch.mockResolvedValueOnce(chatResponse('not json'));
+    const service = new AIService(makeConfig() as never, 'zh');
+    await expect(service.analyzeVectorSearchQuery('x')).resolves.toBeNull();
+
+    fetch.mockResolvedValueOnce(chatResponse(JSON.stringify({
+      intent: 'intent',
+      keywords: ['x'],
+      idealDescription: 'ideal',
+      facets: { artifact: 'skill', action: [], domain: [], platform: [] },
+      highPrecisionTerms: [],
+      lowConfidenceFacets: [],
+    })));
+    await expect(service.analyzeVectorSearchQuery('x')).resolves.toBeNull();
+
+    fetch.mockResolvedValueOnce(chatResponse(JSON.stringify({
+      intent: 'intent',
+      keywords: [],
+      idealDescription: '   ',
+      facets: { artifact: [], action: [], domain: [], platform: [] },
+      highPrecisionTerms: [],
+      lowConfidenceFacets: [],
+    })));
+    await expect(service.analyzeVectorSearchQuery('x')).resolves.toMatchObject({
+      intent: 'intent',
+      idealDescription: '',
+    });
+
+    fetch.mockResolvedValueOnce(chatResponse(JSON.stringify({
+      intent: 'intent',
+      keywords: [],
+      idealDescription: '   ',
+      facets: { artifact: [], action: [], domain: [], platform: [] },
+      highPrecisionTerms: [],
+      lowConfidenceFacets: [],
+    })));
+    await expect(service.analyzeSimilarRepositorySource(
+      makeRepo({ id: 1, name: 'source', full_name: 'owner/source' }),
+      '',
+    )).resolves.toBeNull();
+  });
+
+  it('builds a bounded source profile prompt without popularity or repository identity', async () => {
+    (window.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(chatResponse(JSON.stringify({
+      intent: 'optimize GitHub README files',
+      keywords: ['github', 'readme', 'skill'],
+      idealDescription: 'A peer agent skill for README quality.',
+      facets: { artifact: ['skill'], action: ['optimize'], domain: ['readme'], platform: ['codex'] },
+      highPrecisionTerms: ['readme', 'skill'],
+      lowConfidenceFacets: [],
+    })));
+    const repo = makeRepo({
+      id: 101,
+      name: 'readme-brand',
+      full_name: 'acme/readme-brand',
+      description: 'Agent skill for README quality',
+      ai_tags: ['skill'],
+      stargazers_count: 99999,
+    });
+    const result = await new AIService(makeConfig() as never, 'zh')
+      .analyzeSimilarRepositorySource(repo, '# README mention', undefined);
+    const [, init] = (window.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const messages = JSON.parse(String(init.body)).messages as Array<{ content: string }>;
+    const prompt = messages.map(message => message.content).join('\n');
+
+    expect(result?.idealDescription).toContain('peer agent skill');
+    expect(prompt).not.toContain('acme/readme-brand');
+    expect(prompt).not.toContain('99999');
+  });
+
+  it('accepts complete grades by real ID or ordinal and distinguishes empty', () => {
+    const repos = [
+      makeRepo({ id: 101, name: 'a', full_name: 'acme/a' }),
+      makeRepo({ id: 202, name: 'b', full_name: 'acme/b' }),
+    ];
+    const service = new AIService(makeConfig() as never, 'zh');
+
+    expect(service.parseGradedRerankResult('{"grades":[{"id":202,"grade":2},{"id":1,"grade":1}]}', repos))
+      .toEqual({ status: 'complete', grades: new Map([[202, 2], [101, 1]]) });
+    expect(service.parseGradedRerankResult('{"grades":[]}', repos))
+      .toEqual({ status: 'empty', grades: new Map() });
+  });
+
+  it.each([
+    ['missing candidate', '{"grades":[{"id":101,"grade":2}]}'],
+    ['unknown ID', '{"grades":[{"id":101,"grade":2},{"id":202,"grade":1},{"id":999,"grade":0}]}'],
+    ['duplicate ID', '{"grades":[{"id":101,"grade":2},{"id":101,"grade":1},{"id":202,"grade":0}]}'],
+    ['invalid grade', '{"grades":[{"id":101,"grade":3},{"id":202,"grade":0}]}'],
+  ])('returns invalid for %s', (_label, content) => {
+    const repos = [
+      makeRepo({ id: 101, name: 'a', full_name: 'acme/a' }),
+      makeRepo({ id: 202, name: 'b', full_name: 'acme/b' }),
+    ];
+    const result = new AIService(makeConfig() as never, 'zh').parseGradedRerankResult(content, repos);
+    expect(result.status).toBe('invalid');
+  });
+
+  it('sends one grade per candidate and never includes ranking scores or stars', async () => {
+    (window.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      chatResponse('{"grades":[{"id":101,"grade":2},{"id":202,"grade":0}]}'),
+    );
+    const repos = [
+      makeRepo({ id: 101, name: 'a', full_name: 'acme/a', stargazers_count: 99999 }),
+      makeRepo({ id: 202, name: 'b', full_name: 'acme/b' }),
+    ];
+    const result = await new AIService(makeConfig() as never, 'zh').rerankRepositoriesGraded(
+      repos,
+      'query',
+      null,
+    );
+    const [, init] = (window.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const messages = JSON.parse(String(init.body)).messages as Array<{ content: string }>;
+    const prompt = messages.map(message => message.content).join('\n');
+
+    expect(result?.status).toBe('complete');
+    expect(prompt).toContain('Return one grade for every candidate, exactly once.');
+    expect(prompt).not.toContain('99999');
+    expect(prompt).not.toContain('RRF');
+  });
+
+  it('returns empty for no candidates without calling the LLM', async () => {
+    const result = await new AIService(makeConfig() as never, 'zh').rerankRepositoriesGraded(
+      [],
+      'query',
+      null,
+    );
+
+    expect(result).toEqual({ status: 'empty', grades: new Map() });
+    expect(window.fetch).not.toHaveBeenCalled();
+  });
+
+  it('reranks similar repositories from the cleaned peer profile only', async () => {
+    (window.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      chatResponse('{"grades":[{"id":101,"grade":2},{"id":202,"grade":0}]}'),
+    );
+    const repos = [
+      makeRepo({ id: 101, name: 'a', full_name: 'acme/a', stargazers_count: 99999 }),
+      makeRepo({ id: 202, name: 'b', full_name: 'acme/b' }),
+    ];
+    const result = await new AIService(makeConfig() as never, 'zh').rerankSimilarRepositoriesGraded(
+      makeRepo({ id: 999, name: 'private-brand', full_name: 'source-owner/private-brand' }),
+      repos,
+      {
+        intent: 'maintain README documentation',
+        keywords: ['readme', 'documentation'],
+        idealDescription: 'A peer documentation maintenance skill.',
+        facets: {
+          artifact: ['skill'],
+          action: ['maintain'],
+          domain: ['readme'],
+          platform: ['codex'],
+        },
+        highPrecisionTerms: ['readme', 'skill'],
+        lowConfidenceFacets: [],
+      },
+      undefined,
+    );
+    const [, init] = (window.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    const messages = JSON.parse(String(init.body)).messages as Array<{ content: string }>;
+    const prompt = messages.map(message => message.content).join('\n');
+
+    expect(result?.status).toBe('complete');
+    expect(prompt).toContain('Source intent: maintain README documentation');
+    expect(prompt).not.toContain('source-owner/private-brand');
+    expect(prompt).not.toContain('99999');
+    expect(prompt).not.toContain('RRF');
+  });
+
+  it('parses JSON that follows an inline <think> chain', async () => {
+    (window.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(chatResponse(
+      '<think>Let me reason about { this query } carefully... but never output JSON</think>{"grades":[{"id":101,"grade":2}]}',
+    ));
+    const repos = [
+      makeRepo({ id: 101, name: 'a', full_name: 'acme/a' }),
+      makeRepo({ id: 202, name: 'b', full_name: 'acme/b' }),
+    ];
+    const result = await new AIService(makeConfig() as never, 'zh').rerankRepositoriesGraded(repos, 'query', null);
+    expect(result?.status).toBe('invalid');
+    expect(result?.grades.get(101)).toBe(2);
+  });
+
+  it('keeps the private lexical delegate identical to the public static implementation', () => {
+    const repo = makeRepo({ id: 4, name: 'skill-pack', full_name: 'acme/skill-pack', custom_tags: ['技能'] });
+    const service = new AIService(makeConfig() as never, 'zh');
+    const publicResult = AIService.rankLexicalCandidates([repo], '技能', ['skill']);
+    const privateResult = service['scoreRepositoriesByKeywords']([repo], '技能', ['skill']);
+    expect(privateResult).toEqual(publicResult);
+  });
+});
+
+describe('AIService — 慢/限流 OpenAI 兼容网关的防御性解析', () => {
+  const fetchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const mockFetch = () => {
+    const fetchMock = window.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockReset();
+    return fetchMock;
+  };
+
+  it('HTTP 200 携带 429/throttling 错误体时转为限流 AIRequestError', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { message: 'max connections reached', type: 'throttling_error', code: '429' },
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    const aiError = error as AIRequestError;
+    expect(aiError.status).toBe(429);
+    expect(aiError.isRateLimit).toBe(true);
+    expect(isRateLimitedError(aiError)).toBe(true);
+    expect(aiError.message).toContain('max connections reached');
+  });
+
+  it('HTTP 200 错误体 message 含 rate-limit 字样时也转为限流 AIRequestError', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { message: 'rate-limit exceeded' },
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(429);
+    expect(isRateLimitedError(error)).toBe(true);
+  });
+
+  it('HTTP 200 字符串错误内容为明确限流短语时转为 429', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: 'rate-limit exceeded',
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(429);
+    expect(isRateLimitedError(error)).toBe(true);
+  });
+
+  it('HTTP 200 错误体 message 仅包含 rate_limit 字样但不表示限流时仍为 502', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { type: 'invalid_request_error', message: 'invalid parameter: rate_limit must be positive' },
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(502);
+    expect(isRateLimitedError(error)).toBe(false);
+  });
+
+  it('HTTP 200 非限流网关错误即使消息含 rate limit 也不触发限流判定', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { type: 'upstream_error', message: 'upstream rate limit hit for key' },
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(502);
+    expect((error as AIRequestError).isRateLimit).toBe(false);
+    expect(isRateLimitedError(error)).toBe(false);
+  });
+
+  it('真实 HTTP 503 错误详情含限流短语时仍判定为限流', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({ error: 'rate limit exceeded' }, 503));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(503);
+    expect((error as AIRequestError).fromGatewayBody).toBe(false);
+    expect(isRateLimitedError(error)).toBe(true);
+  });
+
+  it('HTTP 200 携带非限流网关错误体时转为 502 AIRequestError', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { message: 'upstream unavailable', code: 'bad_gateway' },
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.expandSearchQuery('anything').then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    const aiError = error as AIRequestError;
+    expect(aiError.status).toBe(502);
+    expect(aiError.isRateLimit).toBe(false);
+    expect(aiError.message).toContain('upstream unavailable');
+  });
+
+  it('普通 openai 兼容配置的连接测试在 30s 才超时（不再 10s 判“渠道不可用”）', async () => {
+    vi.useFakeTimers();
+    try {
+      const service = new AIService(makeConfig() as never);
+      mockFetch().mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+      }));
+      let settled = false;
+      let result: unknown;
+      const pending = service.testConnection().then((value) => { result = value; settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(29999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await pending;
+      expect(result).toMatchObject({ success: false, errorType: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('analyzeRepository 遇到 AbortError 不记“AI analysis failed”日志但仍抛出', async () => {
+    mockFetch().mockRejectedValue(new DOMException('signal is aborted without reason', 'AbortError'));
+    const errorFromLogger = vi.spyOn(logger, 'errorFromError').mockImplementation(() => {});
+    try {
+      const service = new AIService(makeConfig() as never, 'zh');
+      await expect(service.analyzeRepository(makeRepo({ id: 1, name: 'sample', full_name: 'acme/sample' }), '# readme'))
+        .rejects.toSatisfy(isAbortError);
+      expect(errorFromLogger).not.toHaveBeenCalled();
+    } finally {
+      errorFromLogger.mockRestore();
+    }
+  });
+
+  it('analyzeRepository 非 AbortError 仍照常记录失败日志', async () => {
+    mockFetch().mockRejectedValue(new Error('network down'));
+    const errorFromLogger = vi.spyOn(logger, 'errorFromError').mockImplementation(() => {});
+    try {
+      const service = new AIService(makeConfig() as never, 'zh');
+      await expect(service.analyzeRepository(makeRepo({ id: 1, name: 'sample', full_name: 'acme/sample' }), '# readme'))
+        .rejects.toThrow('network down');
+      expect(errorFromLogger).toHaveBeenCalledWith('ai', 'AI analysis failed', expect.any(Error), expect.anything());
+    } finally {
+      errorFromLogger.mockRestore();
+    }
+  });
+
+  it('testConnection 对 HTTP 200 网关错误体按映射状态码分类', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { message: 'max connections reached', code: '429' },
+    }));
+    const service = new AIService(makeConfig() as never);
+    const result = await service.testConnection();
+    expect(result).toMatchObject({ success: false, statusCode: 429, errorType: 'unknown' });
+    expect(result.message).toContain('HTTP 429');
+  });
+
+  it('testConnection 映射状态码优先于消息中的 network 关键词', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { message: 'network capacity exceeded', code: '429' },
+    }));
+    const service = new AIService(makeConfig() as never);
+    const result = await service.testConnection();
+    expect(result).toMatchObject({ success: false, statusCode: 429, errorType: 'unknown' });
+    expect(result.message).toContain('HTTP 429');
+  });
+
+  it('testConnection 普通错误消息含网络关键词与 IP 地址时归类为 network', async () => {
+    mockFetch().mockRejectedValueOnce(new Error('network request failed to 127.0.0.1'));
+    const service = new AIService(makeConfig() as never);
+    const result = await service.testConnection();
+    expect(result).toMatchObject({ success: false, errorType: 'network' });
+  });
+
+  it('testConnection 已映射状态码的 AIRequestError 不因消息含 abort 关键词被归类为超时', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({
+      error: { message: 'connection aborted by gateway', code: '429' },
+    }));
+    const service = new AIService(makeConfig() as never);
+    const result = await service.testConnection();
+    expect(result).toMatchObject({ success: false, statusCode: 429, errorType: 'unknown' });
+    expect(result.message).toContain('HTTP 429');
+  });
+
+  it('analyzeRepository 信号已中止但请求抛出普通 Error 时不记录失败日志', async () => {
+    mockFetch().mockRejectedValue(new Error('network down'));
+    const errorFromLogger = vi.spyOn(logger, 'errorFromError').mockImplementation(() => {});
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      const service = new AIService(makeConfig() as never, 'zh');
+      await expect(service.analyzeRepository(makeRepo({ id: 1, name: 'sample', full_name: 'acme/sample' }), '# readme', undefined, undefined, controller.signal))
+        .rejects.toThrow('network down');
+      expect(errorFromLogger).not.toHaveBeenCalled();
+    } finally {
+      errorFromLogger.mockRestore();
+    }
+  });
+
+  it('requestTextStream 缺失 Content-Type 的 HTTP 200 限流错误体转为 429 AIRequestError', async () => {
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ error: { message: 'max connections reached', type: 'throttling_error', code: '429' } }),
+    });
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: () => {} }).then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(429);
+    expect(isRateLimitedError(error)).toBe(true);
+  });
+
+  it('requestTextStream application/json 的 HTTP 200 网关错误体转为 502 AIRequestError', async () => {
+    mockFetch().mockResolvedValueOnce(fetchJson({ error: { message: 'bad gateway', type: 'bad_gateway' } }, 200));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: () => {} }).then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(502);
+  });
+
+  it('requestTextStream SSE 帧携带网关错误体时转为 429 AIRequestError', async () => {
+    mockFetch().mockResolvedValueOnce(new Response(
+      'data: {"error":{"message":"max connections reached","type":"throttling_error","code":"429"}}\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: () => {} }).then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(429);
+  });
+
+  it('requestTextStream 增量后接 SSE 错误帧时整体抛出 429 AIRequestError', async () => {
+    const chunks: string[] = [];
+    mockFetch().mockResolvedValueOnce(new Response(
+      'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+      + 'data: {"error":{"message":"max connections reached","type":"throttling_error","code":"429"}}\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: (delta) => chunks.push(delta) }).then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(429);
+    expect(chunks).toEqual(['partial']);
+  });
+
+  it('requestTextStream SSE 错误帧后连接挂起时也立即抛出 429', async () => {
+    const encoder = new TextEncoder();
+    const hangingBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"error":{"message":"max connections reached","type":"throttling_error","code":"429"}}\n\n'));
+        // 故意不关闭流：模拟网关发送错误帧后保持连接。
+      },
+    });
+    mockFetch().mockResolvedValueOnce(new Response(hangingBody, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }));
+    const service = new AIService(makeConfig() as never, 'zh');
+    const error: unknown = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: () => {} }).then(() => null, e => e);
+    expect(error).toBeInstanceOf(AIRequestError);
+    expect((error as AIRequestError).status).toBe(429);
+  }, 2000);
+
+  it('requestTextStream 缺失 Content-Type 时纯文本中的 data: 行不被误判为网关错误帧', async () => {
+    const plainText = 'Sure!\ndata: {"error":{"message":"not really","code":"bad_gateway"}}\nDone';
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => plainText,
+    });
+    const service = new AIService(makeConfig() as never, 'zh');
+    const result = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: () => {} });
+    expect(result).toBe(plainText);
+  });
+
+  it('requestTextStream 缺失 Content-Type 时 id 前缀的普通文本行不被误判为 SSE 帧', async () => {
+    const plainText = 'identity check\ndata: {"error":{"message":"x","code":"429"}}';
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => plainText,
+    });
+    const service = new AIService(makeConfig() as never, 'zh');
+    const result = await service.generateChatTextStream({ system: 's', user: 'u', onChunk: () => {} });
+    expect(result).toBe(plainText);
   });
 });

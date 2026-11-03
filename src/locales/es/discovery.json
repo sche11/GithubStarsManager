@@ -1,11 +1,35 @@
 {
+  "externalFeeds": {
+    "manage": "Canales externos de descubrimiento",
+    "manageRss": "Canal de descubrimiento RSS",
+    "name": "Nombre del canal",
+    "url": "URL HTTPS del feed",
+    "add": "Añadir feed",
+    "checking": "Comprobando feed…",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "rssFormat": "Pega una URL pública de feed RSS o Atom: la app extrae los enlaces a repositorios de GitHub mencionados (los primeros 30 por actualización).",
+    "rss-invalid": "No se encontraron enlaces a repositorios de GitHub en el feed.",
+    "remove": "Eliminar {{name}}",
+    "format": "Pega un enlace HTTPS público cuya respuesta JSON enumere repositorios de GitHub en su campo repositories, hasta 30 repositorios públicos.",
+    "cors-note": "El sitio debe permitir solicitudes del navegador (CORS). No se envía el token de GitHub al feed.",
+    "invalid": "Introduce un nombre y una URL HTTPS válida.",
+    "duplicate": "El feed ya existe o se alcanzó el límite de diez feeds.",
+    "invalid-format": "El JSON no contiene una lista válida de repositorios.",
+    "cors": "No se pudo leer el feed. Comprueba la URL y la configuración CORS.",
+    "unreadable": "No se pudo leer el feed. Comprueba la URL, la disponibilidad y el formato JSON."
+  },
   "discoverySidebar": {
     "just-now": "justo",
     "m-ago": "hace minutos",
     "h-ago": "hace horas",
+    "discovery-label": "Descubrimiento",
     "discovery-channels": "canal de descubrimiento",
     "manage-channels": "Gestionar canales de descubrimiento",
-    "refresh-all": "Actualizar todo"
+    "refresh-all": "Actualizar todo",
+    "channels-section": "Canales",
+    "sources-section": "Fuentes",
+    "channel-count": "{{count}} elementos"
   },
   "discoveryView": {
     "all-loaded": "todo cargado",
@@ -80,7 +104,21 @@
     "platform-filter-v1": "Filtro de plataforma: {{v1}}",
     "items-count": "{{currentCount}} artículos",
     "items-count-with-total": "{{currentCount}} artículos ({{totalCount}} artículos en total)",
-    "total-2": "(total"
+    "total-2": "(total",
+    "search-mode": "Modo de búsqueda",
+    "search-mode-keyword": "Palabras clave",
+    "search-mode-semantic": "IA semántica",
+    "search-mode-semantic-placeholder": "Describe con lenguaje natural el repositorio que buscas, p. ej.: una herramienta de línea de comandos para gestionar notas en Markdown",
+    "search-mode-hint": "La búsqueda semántica con IA encuentra repositorios comparando código público de toda la web (solo repositorios de GitHub) y requiere un servicio de IA configurado",
+    "search-phase-expanding": "La IA analiza la consulta…",
+    "search-phase-recalling": "Recuperación léxica en toda la web…",
+    "search-phase-enriching": "Completando detalles de los repositorios…",
+    "search-phase-reranking": "La IA selecciona y ordena…",
+    "semantic-rate-limited": "Límite de búsquedas de código alcanzado (429), inténtalo de nuevo más tarde",
+    "semantic-no-ai-config": "No hay servicio de IA configurado, se volvió a la búsqueda por palabras clave",
+    "semantic-fallback-toast": "La selección de IA falló, resultados ordenados por coincidencias léxicas",
+    "semantic-empty-recall": "No se encontraron repositorios relacionados en el código público, prueba palabras clave técnicas más específicas",
+    "semantic-empty-ai": "La IA no encontró repositorios relevantes, prueba otra formulación o añade palabras clave técnicas"
   },
   "weeklyIssueModal": {
     "submission-v1": "Contribución #{{v1}}",
@@ -150,5 +188,4 @@
     "stars-gained": "+{{v1}} stars desde la primera vez",
     "first-seen": "El primero se registró {{v1}}"
   }
-
 }

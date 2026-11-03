@@ -7,6 +7,7 @@ import { logger } from '../../services/logger';
 import { normalizeReleaseSourceSettings } from '../../utils/releaseSources';
 import { normalizeXTweetFollows } from '../../utils/xTweetFollows';
 import { normalizeTelegramFollows } from '../../utils/telegramFollows';
+import { normalizeExternalDiscoveryChannels } from '../../utils/discoveryFeeds';
 import type { AppStoreState } from '../types';
 import {
   defaultDiscoveryChannels,
@@ -92,6 +93,7 @@ sortOrder: state.gistSearchFilters.sortOrder,
   assetFilters: state.assetFilters,
   // 卡片可见字段（开发守则 §14）
   repositoryCardFields: state.repositoryCardFields,
+  repositoryCardActions: state.repositoryCardActions,
 
   // Trending 快照（开发守则 §7）：本地榜单历史，不参与任何远端同步
   trendingSnapshots: state.trendingSnapshots,
@@ -157,6 +159,9 @@ discoveryPlatform: state.discoveryPlatform,
 discoveryLanguage: state.discoveryLanguage,
 discoverySortBy: state.discoverySortBy,
 discoverySortOrder: state.discoverySortOrder,
+// 仓库搜索模式（关键词/AI 语义）持久化；语义搜索的 phase 进度与空态原因是
+// 会话级运行时数据（同 discoveryRepos 理由），不入白名单。
+discoverySearchMode: state.discoverySearchMode,
 discoverySelectedTopic: state.discoverySelectedTopic,
   weeklyOnlyCollected: state.weeklyOnlyCollected,
   xTweetFollows: state.xTweetFollows,
@@ -245,7 +250,7 @@ state.selectedDiscoveryChannel = 'trending';
 state.discoveryChannels = defaultDiscoveryChannels;
   } else if (state && Array.isArray(state.discoveryChannels)) {
 const persistedChannels = state.discoveryChannels as unknown[];
-state.discoveryChannels = defaultDiscoveryChannels.map((defaultChannel) => {
+state.discoveryChannels = [...defaultDiscoveryChannels.map((defaultChannel) => {
 const persistedChannel = persistedChannels.find((channel) => {
   return (channel as Record<string, unknown>)?.id === defaultChannel.id;
 }) as Record<string, unknown> | undefined;
@@ -258,7 +263,7 @@ return {
 ...defaultChannel,
 enabled: persistedChannel.enabled !== false,
 };
-});
+}), ...normalizeExternalDiscoveryChannels(persistedChannels)];
   }
   // 迁移订阅频道（版本 4→5：daily-dev → most-dev，新增 trending，补全 nameEn）
   const defaultChannelsMap = new Map(defaultSubscriptionChannels.map(ch => [ch.id, ch]));

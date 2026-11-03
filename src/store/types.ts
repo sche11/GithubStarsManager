@@ -26,6 +26,7 @@ import type {
   DiscoveryChannelId,
   DiscoveryRepo,
   DiscoveryPlatform,
+  ExternalFeedKind,
   ProgrammingLanguage,
   SortBy,
   SortOrder,
@@ -40,6 +41,7 @@ import type {
   SyncMode,
   TranslationEngine,
   RepositoryCardFieldId,
+  RepositoryCardActionPreference,
   RepositoryChatSettings,
   ThemeTokens,
   TrendingSnapshot,
@@ -64,7 +66,7 @@ export interface AppActions {
   setLastSync: (timestamp: string) => void;
   setSyncMode: (mode: SyncMode) => void;
   setSyncModeConfigured: (configured: boolean) => void;
-  pushCategoriesToLists: (api: GitHubListsApiService) => Promise<void>;
+  pushCategoriesToLists: (api: GitHubListsApiService, categoryIds?: string[]) => Promise<void>;
   resetListsPush: () => void;
   setListsPushError: (error: string | null) => void;
   setCategoryListIdMap: (categoryId: string, listId: string) => void;
@@ -240,11 +242,17 @@ export interface AppActions {
   setDiscoveryLastRefresh: (channel: DiscoveryChannelId, timestamp: string) => void;
   updateDiscoveryRepo: (repo: DiscoveryRepo) => void;
   toggleDiscoveryChannel: (channelId: DiscoveryChannelId) => void;
+  addExternalDiscoveryChannel: (name: string, sourceUrl: string, kind?: ExternalFeedKind) => DiscoveryChannelId | null;
+  removeExternalDiscoveryChannel: (channelId: DiscoveryChannelId) => void;
   setDiscoveryPlatform: (platform: DiscoveryPlatform) => void;
   setDiscoveryLanguage: (language: ProgrammingLanguage) => void;
   setDiscoverySortBy: (sortBy: SortBy) => void;
   setDiscoverySortOrder: (sortOrder: SortOrder) => void;
   setDiscoverySearchQuery: (query: string) => void;
+  setDiscoverySearchMode: (mode: 'keyword' | 'semantic') => void;
+  setDiscoverySearchPhase: (phase: string | null) => void;
+  setDiscoverySearchPhaseDetail: (detail: string | null) => void;
+  setDiscoverySearchEmptyReason: (reason: 'recall_empty' | 'ai_empty' | null) => void;
   setDiscoverySelectedTopic: (topic: TopicCategory | null) => void;
   setDiscoveryHasMore: (channel: DiscoveryChannelId, hasMore: boolean) => void;
   setDiscoveryNextPage: (channel: DiscoveryChannelId, page: number) => void;
@@ -274,6 +282,7 @@ export interface AppActions {
   // 仓库卡片可见字段（开发守则 §14）
   /** 切换某个字段的显示；未提供的字段沿用当前值。 */
   setRepositoryCardField: (id: RepositoryCardFieldId, visible: boolean) => void;
+  setRepositoryCardActions: (actions: RepositoryCardActionPreference[]) => void;
 }
 
 export type AppStoreState = AppState & AppActions;

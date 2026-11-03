@@ -5,6 +5,8 @@ import type { Category, Repository } from '../../../types';
 import { useAppStore, getAllCategories } from '../../../store/useAppStore';
 import { AIService, isAbortError } from '../../../services/aiService';
 import { EmbeddingClient, VectorSearchService } from '../../../services/vectorSearchService';
+import { CrossEncoderReranker } from '../../../services/crossEncoderReranker';
+import { runVectorSearchPipeline } from '../../../services/vectorSearchPipeline';
 import { createGitHubApiService, createGitHubListsApiService } from '../../../services/githubApiFactory';
 import { forceSyncToBackend } from '../../../services/autoSync';
 import { useDialog } from '../../../hooks/useDialog';
@@ -12,6 +14,7 @@ import type { GitHubList } from '../../../services/githubListsApi';
 import type { VectorQueryResult } from '../../../services/vectorSearchService';
 import { isReservedCategoryName } from '../../../utils/categoryUtils';
 import { performBasicTextSearch } from '../../../utils/repoSearch';
+import { assignIdentityMatches } from '../../../utils/repositoryIdentity';
 
 // ===== 提纯纯函数（来源逐字对应 SearchBar 基线行号） =====
 
@@ -34,14 +37,42 @@ export const buildSearchPatch = (
   return new Map(boostedResults.map(r => [r.id, r.score]));
 };
 
+/**
+ * 星标同步的分配结果：与 `newRepos` 一一对齐（`undefined` = 新增）。
+ *
+ * 规则本体在 `utils/repositoryIdentity`（id 优先，合成 id 的名称兜底其次），
+ * 与 `addRepository` 共用同一份实现，避免两处口径漂移。
+ */
+const assignStarredRepositories = (
+  newRepos: Repository[],
+  storeRepos: Repository[],
+): Array<Repository | undefined> => assignIdentityMatches(newRepos, storeRepos);
+
+// 当前在途 AI 搜索的控制器（模块级）：新搜索启动时中止旧请求（超代语义），
+// Quick Access 等外部流程也通过 cancelActiveAiSearch 中止，避免过期结果落盘
+const aiSearchAbortRef: { current: AbortController | null } = { current: null };
+
+export const cancelActiveAiSearch = () => {
+  aiSearchAbortRef.current?.abort();
+};
+
+/** 统计本次同步中真正新增的仓库数（与合并口径一致）。 */
+export const countNewStarredRepositories = (
+  newRepos: Repository[],
+  storeRepos: Repository[],
+): number => assignStarredRepositories(newRepos, storeRepos)
+  .filter(assignment => assignment === undefined).length;
+
 // SearchBar 725-750：星标同步结果与本地仓库逐字段合并（license `?? null` 回填）。
 export const mergeStarredRepositories = (
   newRepos: Repository[],
   storeRepos: Repository[],
 ): Repository[] => {
-  const existingRepoMap = new Map(storeRepos.map(repo => [repo.id, repo]));
-  return newRepos.map(newRepo => {
-    const existing = existingRepoMap.get(newRepo.id);
+  // 与 countNewStarredRepositories 共用同一套分配结果，保证「合并」与
+  // 「新增计数」口径一致，且名称兜底不会把同一份本地记录重复用掉。
+  const assignments = assignStarredRepositories(newRepos, storeRepos);
+  return newRepos.map((newRepo, index) => {
+    const existing = assignments[index];
     if (existing) {
       return {
         ...existing,
@@ -250,8 +281,6 @@ export const useSearchActions = (): SearchActions => {
   const [searchPhase, setSearchPhase] = useState<string | null>(null);
   const vectorScoreMapRef = useRef<{ query: string; scores: Map<string, number> } | null>(null);
   const skipNextTextSearchRef = useRef(false);
-  // 当前在途 AI 搜索的控制器：新搜索启动时中止旧请求（超代语义）
-  const aiSearchAbortRef = useRef<AbortController | null>(null);
   const t = useT('repositories');
 
   const keywordSearch = useCallback(async (
@@ -287,7 +316,9 @@ export const useSearchActions = (): SearchActions => {
         aiOrdered = true;
       } catch (error) {
         // 取消不是失败：向上传播交给 aiSearch 静默结束，不产出兜底结果
-        if (isAbortError(error)) throw error;
+        if (options?.signal?.aborted || isAbortError(error)) {
+          throw new DOMException('Search cancelled', 'AbortError');
+        }
         console.warn('❌ AI search failed, falling back to basic search:', error);
         toast(t('useSearchActions.ai-request-failed-fell-back-to-local-lexical-sea'), 'warning');
         filtered = performBasicTextSearch(repositories, query);
@@ -296,6 +327,10 @@ export const useSearchActions = (): SearchActions => {
       console.log('⚠️ No AI config found, using basic text search');
       // Basic text search if no AI config
       filtered = performBasicTextSearch(repositories, query);
+    }
+
+    if (options?.signal?.aborted) {
+      throw new DOMException('Search cancelled', 'AbortError');
     }
 
     // Apply other filters and update results
@@ -334,7 +369,6 @@ export const useSearchActions = (): SearchActions => {
     setIsSearching(true);
     setSearchPhase(null);
     vectorScoreMapRef.current = null;
-    console.log('🔍 Starting AI search for query:', query);
 
     try {
       // ====== 向量搜索分支 ======
@@ -347,104 +381,61 @@ export const useSearchActions = (): SearchActions => {
         try {
           const embeddingClient = new EmbeddingClient(activeEmbConfig);
           const vectorService = new VectorSearchService(vsConfig);
+          const aiConfig = aiConfigs.find(config => config.id === activeAIConfig);
+          const aiService = aiConfig
+            && (vsConfig.enableHyDE !== false || vsConfig.enableReranking !== false)
+            ? new AIService(aiConfig, language)
+            : null;
+          const crossEncoder = activeEmbConfig.apiType === 'siliconflow'
+            ? new CrossEncoderReranker(activeEmbConfig)
+            : null;
+          const result = await runVectorSearchPipeline({
+            query,
+            repositories,
+            vectorConfig: vsConfig,
+            embeddingConfig: activeEmbConfig,
+            aiService,
+            embeddingClient,
+            vectorService,
+            crossEncoder,
+            signal: controller.signal,
+            onPhase: (phase) => {
+              setSearchPhase(
+                phase === 'analyzing'
+                  ? t('useSearchActions.ai-analyzing-query')
+                  : phase === 'embedding'
+                    ? t('useSearchActions.generating-query-vector')
+                    : phase === 'recalling'
+                      ? t('useSearchActions.searching-vector-index')
+                      : t('useSearchActions.ai-semantic-reranking'),
+              );
+            },
+          });
 
-          // 1. HyDE 查询预处理：用 LLM 生成理想仓库描述再嵌入（可选，5 秒超时降级）
-          let embeddingQuery = query;
-          const hydeConfig = aiConfigs.find(config => config.id === activeAIConfig);
-          if (vsConfig.enableHyDE !== false && hydeConfig) {
-            const hydeAbort = new AbortController();
-            let hydeTimer: ReturnType<typeof setTimeout> | null = null;
-            try {
-              setSearchPhase(t('useSearchActions.ai-analyzing-query'));
-              const hydeService = new AIService(hydeConfig, language);
-              embeddingQuery = await Promise.race([
-                hydeService.generateHyDEQuery(query, hydeAbort.signal).catch(() => query),
-                new Promise<string>((resolve) => {
-                  hydeTimer = setTimeout(() => {
-                    hydeAbort.abort();
-                    resolve(query);
-                  }, 5000);
-                }),
-              ]);
-              if (embeddingQuery !== query) {
-                console.log('🔮 HyDE generated:', embeddingQuery.slice(0, 100));
-              }
-            } catch (hydeError) {
-              console.warn('HyDE failed, using raw query:', hydeError);
-              embeddingQuery = query;
-            } finally {
-              if (hydeTimer) clearTimeout(hydeTimer);
-            }
+          if (controller.signal.aborted || aiSearchAbortRef.current !== controller) {
+            throw new DOMException('Search superseded', 'AbortError');
+          }
+          if (result === null) {
+            await keywordSearch(query, applyFilters, { signal: controller.signal });
+            return;
           }
 
-          // 2. 前端调用 Embedding API 生成查询向量
-          setSearchPhase(t('useSearchActions.generating-query-vector'));
-          const queryVectors = await embeddingClient.embed([embeddingQuery], 'query');
-          if (queryVectors && queryVectors.length > 0) {
-            // 2. 前端将查询向量发送到 Worker
-            setSearchPhase(t('useSearchActions.searching-vector-index'));
-            const vectorResults = await vectorService.query(queryVectors[0], {
-              topK: vsConfig.searchTopK ?? 30,
-              threshold: vsConfig.searchThreshold ?? 0.35,
-            });
-
-            if (vectorResults.length > 0) {
-              // 3. 轻量关键词加分：精确匹配的字段给予分数微调
-              const scoreMap = buildSearchPatch(query, vectorResults);
-
-              // 4. 从本地仓库数据中取出匹配结果，按相似度排序
-              const scoredRepos = repositories
-                .filter(repo => scoreMap.has(String(repo.id)))
-                .map(repo => ({
-                  repo,
-                  score: scoreMap.get(String(repo.id)) || 0,
-                }))
-                .sort((a, b) => b.score - a.score)
-                .map(item => item.repo);
-
-              if (scoredRepos.length > 0) {
-                // 4. AI 语义重排序：用 LLM 对向量搜索结果做真正的语义排序
-                let reranked = scoredRepos;
-                let rerankSucceeded = false;
-                const rerankConfig = aiConfigs.find(config => config.id === activeAIConfig);
-                if (rerankConfig && vsConfig.enableReranking !== false) {
-                  try {
-                    setSearchPhase(t('useSearchActions.ai-semantic-reranking'));
-                    const rerankService = new AIService(rerankConfig, language);
-                    reranked = await rerankService.searchRepositoriesWithSemanticReranking(scoredRepos, query);
-                    rerankSucceeded = true;
-                    console.log('🤖 AI semantically reranked results:', reranked.length);
-                  } catch (rerankError) {
-                    console.warn('AI semantic reranking failed, using vector order:', rerankError);
-                  }
-                }
-
-                // 保存 LLM 重排序顺序，applyFilters 可能按 UI 排序覆盖它
-                const rerankOrder = rerankSucceeded
-                  ? new Map(reranked.map((repo, index) => [String(repo.id), index]))
-                  : null;
-                const finalFiltered = applyFilters([...reranked]);
-                if (rerankOrder) {
-                  // 恢复 LLM 语义排序顺序
-                  finalFiltered.sort((a, b) =>
-                    (rerankOrder.get(String(a.id)) ?? Number.MAX_SAFE_INTEGER)
-                    - (rerankOrder.get(String(b.id)) ?? Number.MAX_SAFE_INTEGER)
-                  );
-                } else {
-                  finalFiltered.sort((a, b) => (scoreMap.get(String(b.id)) ?? 0) - (scoreMap.get(String(a.id)) ?? 0));
-                }
-                console.log('🎯 Vector search results:', finalFiltered.length);
-                vectorScoreMapRef.current = { query, scores: scoreMap };
-                skipNextTextSearchRef.current = true;
-                setSearchResults(finalFiltered);
-                setSearchFilters({ query });
-                return;
-              }
-            }
-          }
-          // 向量搜索无结果 → 继续走关键词搜索
-          console.log('⚠️ Vector search returned no results, falling back to keyword search');
+          const finalFiltered = applyFilters([...result.repositories]);
+          const order = new Map(
+            result.repositories.map((repo, index) => [String(repo.id), index]),
+          );
+          finalFiltered.sort((a, b) =>
+            (order.get(String(a.id)) ?? Number.MAX_SAFE_INTEGER)
+            - (order.get(String(b.id)) ?? Number.MAX_SAFE_INTEGER));
+          vectorScoreMapRef.current = { query, scores: result.scoreMap };
+          skipNextTextSearchRef.current = true;
+          setSearchResults(finalFiltered);
+          setSearchFilters({ query });
+          return;
         } catch (vectorError) {
+          if (controller.signal.aborted || isAbortError(vectorError)) {
+            throw new DOMException('Search superseded', 'AbortError');
+          }
           console.warn('❌ Vector search failed, falling back to keyword search:', vectorError);
         }
       }
@@ -539,8 +530,10 @@ export const useSearchActions = (): SearchActions => {
         }
       }
 
-      const existingRepoIds = new Set(storeRepos.map(repo => repo.id));
-      const newRepoCount = newRepositories.filter(repo => !existingRepoIds.has(repo.id)).length;
+      // 「新增仓库」计数必须与 mergeStarredRepositories 用同一套匹配口径
+      // （id 优先，full_name 兜底）：否则被 full_name 兜底救回的存量仓库
+      // 会被误报为新增，弹出「发现 N 个新仓库」的错误提示。
+      const newRepoCount = countNewStarredRepositories(newRepositories, storeRepos);
 
       setRepositories(finalRepositories);
       await forceSyncToBackend();

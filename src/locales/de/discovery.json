@@ -1,11 +1,35 @@
 {
+  "externalFeeds": {
+    "manage": "Externe Entdeckungs-Feeds",
+    "manageRss": "RSS-Entdeckungskanal",
+    "name": "Kanalname",
+    "url": "HTTPS-Feed-URL",
+    "add": "Feed hinzufügen",
+    "checking": "Feed wird geprüft…",
+    "copy": "Kopieren",
+    "copied": "Kopiert",
+    "rssFormat": "Füge eine öffentliche RSS- oder Atom-Feed-URL ein – die App extrahiert die darin genannten GitHub-Repositories (erste 30 pro Aktualisierung).",
+    "rss-invalid": "Keine GitHub-Repository-Links im Feed gefunden.",
+    "remove": "{{name}} entfernen",
+    "format": "Füge einen öffentlichen HTTPS-Link ein, dessen JSON-Antwort GitHub-Repositories im Feld „repositories“ auflistet – bis zu 30 öffentliche Repositories.",
+    "cors-note": "Die Website muss Browseranfragen (CORS) erlauben. Das GitHub-Token wird nicht an den Feed gesendet.",
+    "invalid": "Geben Sie einen Namen und eine gültige HTTPS-URL ein.",
+    "duplicate": "Der Feed ist bereits vorhanden oder das Limit von zehn Feeds wurde erreicht.",
+    "invalid-format": "Das JSON enthält keine gültige Repository-Liste.",
+    "cors": "Feed konnte nicht gelesen werden. Prüfen Sie URL und CORS-Einstellungen.",
+    "unreadable": "Feed konnte nicht gelesen werden. Prüfen Sie URL, Verfügbarkeit und JSON-Format."
+  },
   "discoverySidebar": {
     "just-now": "Nur",
     "m-ago": "vor Minuten",
     "h-ago": "Vor Stunden",
+    "discovery-label": "Entdeckung",
     "discovery-channels": "Entdeckungskanal",
     "manage-channels": "Entdeckungskanäle verwalten",
-    "refresh-all": "Alles aktualisieren"
+    "refresh-all": "Alles aktualisieren",
+    "channels-section": "Kanäle",
+    "sources-section": "Quellen",
+    "channel-count": "{{count}} Einträge"
   },
   "discoveryView": {
     "all-loaded": "Alles geladen",
@@ -80,7 +104,21 @@
     "retry": "Versuchen Sie es erneut",
     "platform-filter-v1": "Plattformfilter: {{v1}}",
     "items-count": "{{currentCount}} Artikel",
-    "items-count-with-total": "{{currentCount}} Artikel ({{totalCount}} Artikel insgesamt)"
+    "items-count-with-total": "{{currentCount}} Artikel ({{totalCount}} Artikel insgesamt)",
+    "search-mode": "Suchmodus",
+    "search-mode-keyword": "Schlüsselwörter",
+    "search-mode-semantic": "KI-Semantik",
+    "search-mode-semantic-placeholder": "Beschreibe das gesuchte Repository in natürlicher Sprache, z. B.: ein Kommandozeilen-Tool zur Verwaltung von Markdown-Notizen",
+    "search-mode-hint": "Die KI-Semantiksuche findet Repositories durch Abgleich öffentlichen Codes im gesamten Web (nur GitHub-Repositories) und erfordert einen konfigurierten KI-Dienst",
+    "search-phase-expanding": "KI analysiert die Anfrage…",
+    "search-phase-recalling": "Lexikalischer Abruf im gesamten Web…",
+    "search-phase-enriching": "Repository-Details werden ergänzt…",
+    "search-phase-reranking": "KI wählt aus und sortiert…",
+    "semantic-rate-limited": "Rate-Limit der Codesuche erreicht (429), bitte später erneut versuchen",
+    "semantic-no-ai-config": "Kein KI-Dienst konfiguriert, Rückfall auf die Schlüsselwortsuche",
+    "semantic-fallback-toast": "KI-Auswahl fehlgeschlagen, Ergebnisse nach lexikalischen Treffern sortiert",
+    "semantic-empty-recall": "Keine passenden Repositories im öffentlichen Code gefunden, versuche spezifischere technische Schlüsselwörter",
+    "semantic-empty-ai": "Die KI hat keine relevanten Repositories gefunden, formuliere um oder ergänze technische Schlüsselwörter"
   },
   "weeklyIssueModal": {
     "submission-v1": "Beitrag #{{v1}}",
@@ -150,5 +188,4 @@
     "stars-gained": "+{{v1}} stars seit dem ersten Eintrag",
     "first-seen": "Erster Eintrag des Spitzenreiters {{v1}}"
   }
-
 }

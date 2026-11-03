@@ -6,9 +6,9 @@ import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import React, { useState, useMemo, useRef, useCallback } from 'react';
 import { Package, Plus, Trash2, Edit3, Save, X, Eye, EyeOff, GripVertical, ArrowUp, ArrowDown, ArrowUpToLine, ArrowDownToLine, LayoutGrid } from 'lucide-react';
 import { useAppStore, getAllCategories, sortCategoriesByOrder } from '../../store/useAppStore';
-import { StepperInput } from '../ui/StepperInput';
 import { useDialog } from '../../hooks/useDialog';
 import { validateCategoryName } from '../../utils/categoryUtils';
+import { CategoryGlyph } from '../CategoryGlyph';
 
 interface CategoryPanelProps {
   t: TranslateFn;
@@ -19,7 +19,6 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
   const hiddenDefaultCategoryIds = useAppStore(state => state.hiddenDefaultCategoryIds);
   const defaultCategoryOverrides = useAppStore(state => state.defaultCategoryOverrides);
   const categoryOrder = useAppStore(state => state.categoryOrder);
-  const collapsedSidebarCategoryCount = useAppStore(state => state.collapsedSidebarCategoryCount);
   const categoryMatchMode = useAppStore(state => state.categoryMatchMode);
   const language = useAppStore(state => state.language);
   const addCustomCategory = useAppStore(state => state.addCustomCategory);
@@ -32,7 +31,6 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
   const hideDefaultCategory = useAppStore(state => state.hideDefaultCategory);
   const showDefaultCategory = useAppStore(state => state.showDefaultCategory);
   const setCategoryOrder = useAppStore(state => state.setCategoryOrder);
-  const setCollapsedSidebarCategoryCount = useAppStore(state => state.setCollapsedSidebarCategoryCount);
   const setCategoryMatchMode = useAppStore(state => state.setCategoryMatchMode);
 
   const { toast, confirm } = useDialog();
@@ -284,36 +282,6 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
         </Button>
       </div>
 
-      {/* 折叠侧边栏显示设置 */}
-      <div className="p-4 bg-muted dark:bg-muted/40 rounded-lg border border-border dark:border-border dark:border-border dark:border-border">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <LayoutGrid className="w-5 h-5 text-muted-foreground dark:text-muted-foreground" />
-            <div>
-              <h4 className="font-medium text-foreground dark:text-foreground">
-                {t('categoryPanel.collapsed-sidebar-display')}
-              </h4>
-              <p className="text-sm text-muted-foreground dark:text-muted-foreground">
-                {t('categoryPanel.set-the-number-of-categories-to-display-when-col')}
-              </p>
-              <p className="text-xs text-muted-foreground dark:text-muted-foreground mt-1">
-                {t('categoryPanel.tip-the-collapsed-sidebar-only-affects-display-a')}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center space-x-3">
-            <StepperInput
-              value={collapsedSidebarCategoryCount}
-              onChange={setCollapsedSidebarCategoryCount}
-              min={1}
-              step={1}
-              decreaseLabel={t('categoryPanel.decrease-category-count')}
-              increaseLabel={t('categoryPanel.increase-category-count')}
-            />
-          </div>
-        </div>
-      </div>
-
       {/* 分类匹配模式设置 */}
       <div className="p-4 bg-muted dark:bg-muted/40 rounded-lg border border-border dark:border-border">
         <div className="flex items-center space-x-3 mb-2">
@@ -366,7 +334,7 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                 type="text"
                 value={newCategoryName}
                 onChange={(e) => setNewCategoryName(e.target.value)}
-                className="w-full px-3 py-2 border border-border dark:border-border rounded-lg bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent focus:outline-none"
+                className="w-full px-3 py-2 border border-border dark:border-border rounded-lg bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent focus:outline-none"
                 placeholder={t('categoryPanel.e-g-my-projects')}
               />
             </div>
@@ -385,7 +353,7 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                     setNewCategoryIcon(value);
                   }
                 }}
-                className="w-full px-3 py-2 border border-border dark:border-border rounded-lg bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent focus:outline-none"
+                className="w-full px-3 py-2 border border-border dark:border-border rounded-lg bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent focus:outline-none"
                 placeholder="📁"
               />
             </div>
@@ -399,7 +367,7 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
               type="text"
               value={newCategoryKeywords}
               onChange={(e) => setNewCategoryKeywords(e.target.value)}
-              className="w-full px-3 py-2 border border-border dark:border-border rounded-lg bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent focus:outline-none"
+              className="w-full px-3 py-2 border border-border dark:border-border rounded-lg bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent focus:outline-none"
               placeholder={t('categoryPanel.comma-separated-keywords')}
             />
             <p className="text-xs text-muted-foreground dark:text-muted-foreground mt-1">
@@ -541,11 +509,13 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                             onChange={(e) => {
                               const value = e.target.value;
                               const graphemeCount = Array.from(value).length;
-                              if (graphemeCount <= 2) {
+                              // CategoryEditModal 生成的 lucide:xxx 图标超过 2 字素，
+                              // 放行该前缀使这类图标值仍可局部编辑
+                              if (graphemeCount <= 2 || value.startsWith('lucide:')) {
                                 setEditIcon(value);
                               }
                             }}
-                            className="w-14 px-2 py-1.5 border border-border dark:border-border rounded bg-card dark:bg-muted/40 text-center text-lg text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent focus:outline-none"
+                            className="w-14 px-2 py-1.5 border border-border dark:border-border rounded bg-card dark:bg-muted/40 text-center text-lg text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent focus:outline-none"
                             placeholder="📁"
                           />
                           <Input
@@ -553,7 +523,7 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                             aria-label={t('categoryPanel.edit-category-name')}
                             value={editName}
                             onChange={(e) => setEditName(e.target.value)}
-                            className="flex-1 px-2 py-1.5 border border-border dark:border-border rounded bg-card dark:bg-muted/40 text-sm text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent focus:outline-none"
+                            className="flex-1 px-2 py-1.5 border border-border dark:border-border rounded bg-card dark:bg-muted/40 text-sm text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent focus:outline-none"
                             placeholder={t('categoryPanel.category-name-2')}
                           />
                         </div>
@@ -563,7 +533,7 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                             aria-label={t('categoryPanel.edit-category-keywords')}
                             value={editKeywords}
                             onChange={(e) => setEditKeywords(e.target.value)}
-                            className="flex-1 px-2 py-1.5 border border-border dark:border-border rounded bg-card dark:bg-muted/40 text-sm text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent focus:outline-none"
+                            className="flex-1 px-2 py-1.5 border border-border dark:border-border rounded bg-card dark:bg-muted/40 text-sm text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent focus:outline-none"
                             placeholder={t('categoryPanel.keywords-comma-separated')}
                           />
                           <Button
@@ -632,7 +602,12 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                         {isReordering && (
                           <GripVertical className="w-4 h-4 text-muted-foreground dark:text-muted-foreground" />
                         )}
-                        <span className="text-base w-6 text-center inline-block">{category.icon}</span>
+                        <CategoryGlyph
+                          icon={category.icon}
+                          name={category.name}
+                          categoryId={category.id}
+                          className="app-settings-category-glyph"
+                        />
                         <span className="text-sm font-medium text-foreground dark:text-foreground">
                           {category.name}
                         </span>
@@ -764,7 +739,12 @@ export const CategoryPanel: React.FC<CategoryPanelProps> = ({ t }) => {
                   className="inline-flex items-center space-x-2 px-3 py-2 rounded-lg bg-muted text-foreground dark:bg-muted/40 dark:text-muted-foreground hover:bg-accent dark:hover:bg-accent transition-colors"
                 >
                   <Eye className="w-4 h-4" />
-                  <span className="w-5 text-center inline-block">{category.icon}</span>
+                  <CategoryGlyph
+                    icon={category.icon}
+                    name={category.name}
+                    categoryId={category.id}
+                    className="app-settings-category-glyph"
+                  />
                   <span>{category.name}</span>
                 </Button>
               ))}

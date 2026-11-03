@@ -11,6 +11,7 @@ import {
   RefreshCw,
   TrendingUp,
   Bot,
+  Check,
   Loader2,
   Rocket,
   Tag,
@@ -27,7 +28,8 @@ import {
 import { SiAndroid, SiApple, SiLinux, SiX, SiTelegram } from '@icons-pack/react-simple-icons';
 import { SiWindows } from './SiWindows';
 import { useAppStore } from '../store/useAppStore';
-import { useDiscoveryActions } from '../features/discovery/hooks/useDiscoveryActions';
+import { buildDiscoverySearchKey, getLastSettledSearchKey, useDiscoveryActions } from '../features/discovery/hooks/useDiscoveryActions';
+import { useWebScrapeSupport } from '../hooks/useWebScrapeSupport';
 import { DiscoverySidebar } from './DiscoverySidebar';
 import { DiscoveryChannelMenu } from './DiscoveryChannelMenu';
 import { TrendingHistoryPanel } from '../features/discovery/components/TrendingHistoryPanel';
@@ -41,6 +43,7 @@ import { TelegramSettingsModal } from './TelegramSettingsModal';
 import { Input } from './ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from './ui/dropdown-menu';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 import type {
   DiscoveryChannel,
   DiscoveryChannelId,
@@ -233,7 +236,7 @@ const MobileTabNav: React.FC<MobileTabNavProps> = ({
               className={`
                 relative flex-shrink-0 px-4 py-2 rounded-lg text-sm font-medium snap-start
                 transition-all duration-200 ease-out
-                focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-(--ui-focus-ring) focus-visible:ring-offset-2
                 ${selectedChannel === channel.id
                   ? 'text-foreground dark:text-foreground '
                   : 'text-muted-foreground dark:text-muted-foreground hover:text-foreground dark:hover:text-foreground hover:bg-muted dark:hover:bg-accent'
@@ -305,7 +308,7 @@ const PlatformFilter: React.FC<PlatformFilterProps> = ({ platform, onPlatformCha
             <DropdownMenuRadioItem
               key={p.id}
               value={p.id}
-              className={platform === p.id ? 'bg-accent text-accent-foreground' : ''}
+              className={`app-platform-menu-item flex items-center gap-2 ${platform === p.id ? 'bg-accent text-accent-foreground' : ''}`}
             >
               {p.icon}
               <span>{discoveryPlatformName(p, language)}</span>
@@ -330,6 +333,8 @@ interface CustomSelectProps {
   className?: string;
   dropdownClassName?: string;
   ariaLabel?: string;
+  /** 禁用整个下拉（语义搜索模式下排序无意义时使用） */
+  disabled?: boolean;
 }
 
 const CustomSelect: React.FC<CustomSelectProps> = ({
@@ -339,6 +344,7 @@ const CustomSelect: React.FC<CustomSelectProps> = ({
   className = '',
   dropdownClassName = '',
   ariaLabel,
+  disabled = false,
 }) => {
   const selectedOption = options.find(o => o.value === value);
 
@@ -348,8 +354,9 @@ const CustomSelect: React.FC<CustomSelectProps> = ({
         <Button
           type="button"
           variant="outline"
+          disabled={disabled}
           aria-label={ariaLabel ?? selectedOption?.label}
-          className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium bg-card dark:bg-muted/40 border border-border dark:border-border text-foreground dark:text-muted-foreground hover:bg-accent dark:hover:bg-accent transition-colors ${className}`}
+          className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium bg-card dark:bg-muted/40 border border-border dark:border-border text-foreground dark:text-muted-foreground hover:bg-accent dark:hover:bg-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
         >
           {selectedOption?.icon && <span className="h-4 w-4">{selectedOption.icon}</span>}
           <span>{selectedOption?.label}</span>
@@ -362,9 +369,9 @@ const CustomSelect: React.FC<CustomSelectProps> = ({
             <DropdownMenuRadioItem
               key={option.value}
               value={option.value}
-              className={value === option.value ? 'bg-accent text-accent-foreground' : ''}
+              className={`gap-2 ${value === option.value ? 'bg-accent text-accent-foreground' : ''}`}
             >
-              {option.icon && <span className="h-4 w-4">{option.icon}</span>}
+              {option.icon && <span className="h-4 w-4 shrink-0">{option.icon}</span>}
               <span>{option.label}</span>
             </DropdownMenuRadioItem>
           ))}
@@ -381,6 +388,37 @@ interface LoadMoreButtonProps {
   totalCount: number;
   language: AppLanguage;
 }
+
+/** 语义搜索四阶段（顺序即管道顺序），UI 据此渲染进度指示。 */
+const SEMANTIC_PHASE_ORDER = ['expanding', 'recalling', 'enriching', 'reranking'] as const;
+
+/** 语义搜索过程状态：已完成打勾、当前阶段旋转 + 脉冲 + 明细（如补全计数）、未到阶段弱化。 */
+const SemanticSearchProgress: React.FC<{ phase: string; detail: string | null }> = ({ phase, detail }) => {
+  const t = useT('discovery');
+  const currentIndex = SEMANTIC_PHASE_ORDER.indexOf(phase as typeof SEMANTIC_PHASE_ORDER[number]);
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground dark:text-muted-foreground">
+      {SEMANTIC_PHASE_ORDER.map((step, index) => {
+        const done = currentIndex > index;
+        const active = currentIndex === index;
+        return (
+          <span
+            key={step}
+            className={`flex items-center gap-1.5 ${active ? 'text-foreground dark:text-foreground' : ''} ${!done && !active ? 'opacity-50' : ''}`}
+          >
+            {done
+              ? <Check className="h-3 w-3" />
+              : active
+                ? <Loader2 className="h-3 w-3 animate-spin" />
+                : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+            <span className={active ? 'animate-pulse' : ''}>{t(`discoveryView.search-phase-${step}`)}</span>
+            {active && detail && <span className="tabular-nums">({detail})</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
+};
 
 const LoadMoreButton: React.FC<LoadMoreButtonProps> = ({
   onLoadMore,
@@ -453,6 +491,7 @@ const DataStats: React.FC<DataStatsProps> = ({ currentCount, totalCount }) => {
 export const DiscoveryView: React.FC = React.memo(() => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const toggleDiscoveryChannel = useAppStore(state => state.toggleDiscoveryChannel);
+  const { supported: scrapeSupport, settled: scrapeSupportSettled } = useWebScrapeSupport();
   const {
     githubToken,
     language,
@@ -476,6 +515,11 @@ export const DiscoveryView: React.FC = React.memo(() => {
     setDiscoverySortOrder,
     discoverySearchQuery,
     setDiscoverySearchQuery,
+    discoverySearchMode,
+    setDiscoverySearchMode,
+    discoverySearchPhase,
+    discoverySearchPhaseDetail,
+    discoverySearchEmptyReason,
     discoverySelectedTopic,
     setDiscoverySelectedTopic,
     discoveryHasMore,
@@ -497,6 +541,7 @@ export const DiscoveryView: React.FC = React.memo(() => {
     refreshChannel,
     handleAnalyzePage,
     handleAbortAnalysis,
+    handleAbortSearch,
   } = useDiscoveryActions(scrollContainerRef);
 
   const [searchInput, setSearchInput] = useState(discoverySearchQuery);
@@ -521,10 +566,31 @@ export const DiscoveryView: React.FC = React.memo(() => {
     if (typeof window === 'undefined') return false;
     return window.location.protocol === 'file:' || navigator.userAgent.includes('Electron');
   }, []);
-  const safeDiscoveryChannels = useMemo(
-    () => Array.isArray(discoveryChannels) ? discoveryChannels.filter(Boolean) : [],
-    [discoveryChannels]
-  );
+  const safeDiscoveryChannels = useMemo(() => {
+    if (!Array.isArray(discoveryChannels)) return [];
+    // 可用性未确定（启动探测中）先全部显示，避免 Web+后端用户的可用频道闪烁；
+    // 纯浏览器模式（无桌面壳、无后端）无法抓取 X 推文与 Telegram，落定后直接隐藏
+    if (!scrapeSupportSettled || scrapeSupport) return discoveryChannels.filter(Boolean);
+    return discoveryChannels.filter(channel => Boolean(channel)
+      && channel.id !== 'x-tweet' && channel.id !== 'telegram');
+  }, [discoveryChannels, scrapeSupport, scrapeSupportSettled]);
+
+  // 抓取支持落定后（纯浏览器模式）：隐藏频道移出列表，确保仍有一个可见启用
+  // 频道（水合期间不做该决策，必要时在此恢复「趋势」），并把选中的被隐藏频
+  // 道回退到可见频道
+  useEffect(() => {
+    if (!scrapeSupportSettled || scrapeSupport) return;
+    const visibleEnabledExists = safeDiscoveryChannels.some(ch => ch.enabled && ch.id !== 'code-search');
+    if (!visibleEnabledExists) {
+      if (!safeDiscoveryChannels.find(ch => ch.id === 'trending')?.enabled) toggleDiscoveryChannel('trending');
+      setSelectedDiscoveryChannel('trending');
+      return;
+    }
+    if (selectedDiscoveryChannel === 'x-tweet' || selectedDiscoveryChannel === 'telegram') {
+      const fallback = safeDiscoveryChannels.find(ch => ch.enabled && ch.id !== 'code-search')?.id ?? 'trending';
+      setSelectedDiscoveryChannel(fallback);
+    }
+  }, [scrapeSupport, scrapeSupportSettled, selectedDiscoveryChannel, safeDiscoveryChannels, toggleDiscoveryChannel, setSelectedDiscoveryChannel]);
 
   // 获取当前频道的所有仓库
   const allRepos = useMemo(
@@ -583,11 +649,42 @@ export const DiscoveryView: React.FC = React.memo(() => {
     // 取消持久化后，首次打开或切换到空频道时自动加载（代码搜索走本地实时请求，不参与自动拉取）
     const hasRepos = useAppStore.getState().discoveryRepos[selectedDiscoveryChannel]?.length > 0;
     const isLoading = useAppStore.getState().discoveryIsLoading[selectedDiscoveryChannel];
-    if (selectedDiscoveryChannel !== 'topic' && selectedDiscoveryChannel !== 'code-search' && !hasRepos && !isLoading && autoFetchChannelRef.current !== selectedDiscoveryChannel) {
+    if (selectedDiscoveryChannel !== 'topic' && selectedDiscoveryChannel !== 'code-search' && selectedDiscoveryChannel !== 'search' && !hasRepos && !isLoading && autoFetchChannelRef.current !== selectedDiscoveryChannel) {
       autoFetchChannelRef.current = selectedDiscoveryChannel;
       refreshChannel(selectedDiscoveryChannel, 1, false);
     }
   }, [selectedDiscoveryChannel, refreshChannel]);
+
+  // 只在查询/模式真正变化时触发搜索。组件重新挂载（切到别的页面再切回发现页）
+  // 时，同一查询已完成或已取消则复用现有结果，不重跑整条语义搜索。
+  const lastAutoSearchKeyRef = useRef<string | null>(getLastSettledSearchKey());
+  useEffect(() => {
+    if (selectedDiscoveryChannel !== 'search') return;
+    if (!discoverySearchQuery.trim()) return;
+    const key = buildDiscoverySearchKey(discoverySearchQuery, discoverySearchMode, {
+      owner: githubToken,
+      platform: discoveryPlatform,
+      language: discoveryLanguage,
+      sortBy: discoverySortBy,
+      sortOrder: discoverySortOrder,
+    });
+    if (lastAutoSearchKeyRef.current === key) return;
+    lastAutoSearchKeyRef.current = key;
+    refreshChannel('search', 1, false);
+    // StrictMode replays effects after cleanup; restore the last settled key
+    // so the aborted replay can restart without repeating a completed search.
+    return () => { lastAutoSearchKeyRef.current = getLastSettledSearchKey(); };
+  }, [
+    selectedDiscoveryChannel,
+    discoverySearchQuery,
+    discoverySearchMode,
+    githubToken,
+    discoveryPlatform,
+    discoveryLanguage,
+    discoverySortBy,
+    discoverySortOrder,
+    refreshChannel,
+  ]);
 
   // 趋势时间范围改变时刷新数据
   useEffect(() => {
@@ -692,10 +789,18 @@ export const DiscoveryView: React.FC = React.memo(() => {
 
   const handleSearch = useCallback(() => {
     if (selectedDiscoveryChannel === 'search') {
-      setDiscoverySearchQuery(searchInput);
-      refreshChannel('search', 1, false);
+      const query = searchInput.trim();
+      if (!query) return;
+      if (query === discoverySearchQuery) refreshChannel('search', 1, false);
+      else setDiscoverySearchQuery(query);
     }
-  }, [selectedDiscoveryChannel, searchInput, setDiscoverySearchQuery, refreshChannel]);
+  }, [selectedDiscoveryChannel, discoverySearchQuery, searchInput, setDiscoverySearchQuery, refreshChannel]);
+
+  // 搜索模式切换：关键词 ↔ AI 语义。这里只写 store；查询/模式变化的自动搜索
+  // 统一由下方 key 守卫 effect 触发，避免重复请求。
+  const handleSearchModeChange = useCallback((value: string) => {
+    setDiscoverySearchMode(value as 'keyword' | 'semantic');
+  }, [setDiscoverySearchMode]);
 
   const handleLoadMore = useCallback(async () => {
     if (!discoveryHasMore[selectedDiscoveryChannel]) {
@@ -757,12 +862,13 @@ export const DiscoveryView: React.FC = React.memo(() => {
       />
 
       <div
-        className="flex flex-col gap-4 lg:flex-row lg:gap-6 flex-1 min-h-0 min-w-0 items-start"
+        className="route-workspace flex-1 min-h-0 min-w-0"
       >
-        <div
+        <aside
           ref={sidebarRef}
-          className="hidden lg:block w-64 shrink-0 sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto overflow-x-hidden"
-          style={{ WebkitOverflowScrolling: 'touch' }}
+          data-context-sidebar="discovery"
+          aria-label={t('discoverySidebar.discovery-channels')}
+          className="context-sidebar hidden shrink-0 lg:flex lg:w-(--app-sidebar-width)"
         >
           <DiscoverySidebar
             channels={safeDiscoveryChannels}
@@ -778,72 +884,72 @@ export const DiscoveryView: React.FC = React.memo(() => {
               setSelectedDiscoveryChannel(channel);
             }}
             onRefreshAll={refreshAll}
+            totalCount={discoveryTotalCount}
             isLoading={discoveryIsLoading}
             lastRefresh={discoveryLastRefresh}
             isAnalyzing={isAnalyzing}
             language={language}
           />
-        </div>
+        </aside>
 
-        <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
+        <div className="workspace-content app-workspace-content flex flex-col min-h-0 min-w-0 relative">
+          <WorkspacePageHeader
+            eyebrow={t('discoverySidebar.channels-section')}
+            section={t('app:header.menu-subscription')}
+            title={language === 'zh'
+              ? currentChannel?.name ?? t('discoveryView.repo-search')
+              : discoveryChannelName(currentChannel ?? { id: 'search', name: '仓库搜索', nameEn: 'Repo Search' }, language)}
+            description={currentLastRefresh
+              ? `${t('discoveryView.updated')} ${formatLastRefresh(currentLastRefresh)}`
+              : undefined}
+            meta={selectedDiscoveryChannel !== 'code-search' ? (
+              <span className="app-workspace-meta-pill">
+                {t('discoveryView.items-count', { currentCount: currentTotalCount })}
+              </span>
+            ) : undefined}
+            actions={selectedDiscoveryChannel !== 'code-search' ? (
+              <div className="relative group/refresh shrink-0">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => refreshChannel(selectedDiscoveryChannel, 1, false)}
+                  disabled={currentIsLoading || isAnalyzing}
+                  className="ui-icon-button"
+                  title={t('discoveryView.refresh')}
+                  aria-label={t('discoveryView.refresh')}
+                >
+                  <RefreshCw className={`w-4 h-4 ${currentIsLoading ? 'animate-spin' : ''}`} />
+                </Button>
+                {selectedDiscoveryChannel === 'hot-release' && (
+                  <div className="absolute top-full mt-2 right-0 z-50 opacity-0 group-hover/refresh:opacity-100 translate-y-1 group-hover/refresh:translate-y-0 transition-all duration-200 pointer-events-none">
+                    <div className="bg-popover text-popover-foreground border border-border text-xs rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">
+                      {t('discoveryView.each-refresh-shows-different-content')}
+                    </div>
+                    <div className="absolute -top-1 right-3 w-2 h-2 bg-popover border-t border-l border-border rotate-45" />
+                  </div>
+                )}
+              </div>
+            ) : undefined}
+          />
           {/* 顶部工具栏 - 随滚动显示/隐藏 */}
           <div 
             className={`flex-shrink-0 pr-2 transition-transform duration-300 ease-in-out z-10 ${
               isToolbarVisible ? 'translate-y-0' : '-translate-y-full opacity-0 pointer-events-none'
             }`}
           >
-            <div className="ui-toolbar p-3.5 sm:p-4 mb-4">
-              {/* 第一行：标题和刷新按钮 */}
-              <div className="flex items-center justify-between gap-2 mb-2.5">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${currentChannelStyle.gradient} flex items-center justify-center shadow-md ${currentChannelStyle.shadow}`}>
-                    {currentChannelIconNode}
-                  </div>
-                  <div className="min-w-0">
-                    <h2 className="text-base sm:text-lg font-bold text-foreground dark:text-foreground truncate leading-tight">
-                      {language === 'zh'
-                        ? currentChannel?.name
-                        : discoveryChannelName(currentChannel ?? { id: 'search', name: '仓库搜索', nameEn: 'Repo Search' }, language)}
-                    </h2>
-                    {currentLastRefresh && (
-                      <p className="hidden sm:block text-xs text-muted-foreground dark:text-muted-foreground">
-                        {t('discoveryView.updated')} {formatLastRefresh(currentLastRefresh)}
-                      </p>
-                    )}
-                  </div>
-                </div>
-                {selectedDiscoveryChannel !== 'code-search' && (
-                <div className="relative group/refresh shrink-0">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => refreshChannel(selectedDiscoveryChannel, 1, false)}
-                    disabled={currentIsLoading || isAnalyzing}
-                    className="p-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title={t('discoveryView.refresh')}
-                  >
-                    <RefreshCw className={`w-4 h-4 ${currentIsLoading ? 'animate-spin' : ''}`} />
-                  </Button>
-                  {selectedDiscoveryChannel === 'hot-release' && (
-                    <div className="absolute top-full mt-2 right-0 z-50 opacity-0 group-hover/refresh:opacity-100 translate-y-1 group-hover/refresh:translate-y-0 transition-all duration-200 pointer-events-none">
-                      <div className="bg-popover text-popover-foreground border border-border text-xs rounded-lg px-3 py-2 whitespace-nowrap shadow-lg">
-                        {t('discoveryView.each-refresh-shows-different-content')}
-                      </div>
-                      <div className="absolute -top-1 right-3 w-2 h-2 bg-popover border-t border-l border-border rotate-45" />
-                    </div>
-                  )}
-                </div>
-                )}
-              </div>
-              
+            {selectedDiscoveryChannel !== 'code-search' && (
+            <div className="ui-toolbar app-page-toolbar app-discovery-toolbar p-3.5 sm:p-4 mb-4">
               {/* 第二行：筛选和操作按钮（代码搜索频道使用自有工具条，此处隐藏仓库维度控件） */}
-              {selectedDiscoveryChannel !== 'code-search' && (
               <div className="flex items-center gap-2 flex-wrap">
                 {selectedDiscoveryChannel === 'trending' && (
-            <div className="flex items-center gap-1.5">
-              <Calendar className="w-4 h-4 text-muted-foreground dark:text-muted-foreground" />
+            <div className="app-discovery-time-filter">
               <Select value={trendingTimeRange} onValueChange={(value) => setTrendingTimeRange(value as TrendingTimeRange)}>
-                <SelectTrigger aria-label={t('discoveryView.time-range')} className="ui-field h-9 w-auto min-w-28 px-3 py-1.5 text-sm font-medium text-foreground dark:text-foreground"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label={t('discoveryView.time-range')} className="ui-field app-discovery-time-select h-9 w-auto min-w-28 px-3 py-1.5 text-sm font-medium text-foreground dark:text-foreground">
+                  <span className="app-discovery-time-select-value">
+                    <Calendar className="h-4 w-4 text-muted-foreground dark:text-muted-foreground" />
+                    <SelectValue />
+                  </span>
+                </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="daily">{t('discoveryView.today')}</SelectItem>
                   <SelectItem value="weekly">{t('discoveryView.this-week')}</SelectItem>
@@ -925,7 +1031,7 @@ export const DiscoveryView: React.FC = React.memo(() => {
                   </button>
                 )}
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  {selectedDiscoveryChannel !== 'weekly' && selectedDiscoveryChannel !== 'x-tweet' && selectedDiscoveryChannel !== 'telegram' && (
+                  {!currentChannel?.sourceUrl && selectedDiscoveryChannel !== 'weekly' && selectedDiscoveryChannel !== 'x-tweet' && selectedDiscoveryChannel !== 'telegram' && (
                     <PlatformFilter
                       platform={discoveryPlatform}
                       onPlatformChange={setDiscoveryPlatform}
@@ -988,8 +1094,8 @@ export const DiscoveryView: React.FC = React.memo(() => {
                   />
                 </div>
               </div>
-              )}
             </div>
+            )}
           </div>
 
           {/* 内容区域 */}
@@ -1005,27 +1111,61 @@ export const DiscoveryView: React.FC = React.memo(() => {
                 ? 'ui-toolbar p-4 space-y-4'
                 : 'ui-toolbar p-5 space-y-4'}>
                 <div className="flex flex-col sm:flex-row gap-3">
+                  {/* 搜索模式下拉：关键词（默认，行为不变）/ AI 语义（全网仓库） */}
+                  <CustomSelect
+                    value={discoverySearchMode}
+                    onChange={handleSearchModeChange}
+                    ariaLabel={t('discoveryView.search-mode')}
+                    options={[
+                      { value: 'keyword', label: t('discoveryView.search-mode-keyword'), icon: <Search className="w-4 h-4" /> },
+                      { value: 'semantic', label: t('discoveryView.search-mode-semantic'), icon: <Bot className="w-4 h-4" /> },
+                    ]}
+                  />
                   <div className="flex-1 relative">
                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground dark:text-muted-foreground" />
                     <Input
                       type="text"
-                      aria-label={t('discoveryView.search-repositories')}
+                      aria-label={discoverySearchMode === 'semantic'
+                        ? t('discoveryView.search-mode-semantic-placeholder')
+                        : t('discoveryView.search-repositories')}
                       value={searchInput}
                       onChange={(e) => setSearchInput(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                      placeholder={t('discoveryView.search-repositories-2')}
+                      placeholder={discoverySearchMode === 'semantic'
+                        ? t('discoveryView.search-mode-semantic-placeholder')
+                        : t('discoveryView.search-repositories-2')}
                       className="ui-field h-auto w-full py-2.5 pl-10 pr-4 text-foreground dark:text-foreground" />
                   </div>
-                  <Button
-                    onClick={handleSearch}
-                    aria-label={t('discoveryView.search')}
-                    disabled={!searchInput.trim() || currentIsLoading}
-                    className="ui-button-primary px-5 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 font-medium"
-                  >
-                    <Search className="w-4 h-4" />
-                    <span className="hidden sm:inline">{t('discoveryView.search')}</span>
-                  </Button>
+                  {currentIsLoading ? (
+                    <Button
+                      onClick={handleAbortSearch}
+                      aria-label={t('discoveryView.stop')}
+                      title={t('discoveryView.stop')}
+                      className="ui-button-secondary px-5 py-2.5 flex items-center gap-2 font-medium"
+                    >
+                      <X className="w-4 h-4" />
+                      <span className="hidden sm:inline">{t('discoveryView.stop')}</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleSearch}
+                      aria-label={t('discoveryView.search')}
+                      disabled={!searchInput.trim()}
+                      className="ui-button-primary px-5 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 font-medium"
+                    >
+                      <Search className="w-4 h-4" />
+                      <span className="hidden sm:inline">{t('discoveryView.search')}</span>
+                    </Button>
+                  )}
                 </div>
+                {discoverySearchMode === 'semantic' && (
+                  <p className="text-xs text-muted-foreground dark:text-muted-foreground">
+                    {t('discoveryView.search-mode-hint')}
+                  </p>
+                )}
+                {discoverySearchPhase && (
+                  <SemanticSearchProgress phase={discoverySearchPhase} detail={discoverySearchPhaseDetail} />
+                )}
                 
                 <div className="flex flex-wrap gap-2.5">
                   <Select value={discoveryLanguage} onValueChange={(value) => setDiscoveryLanguage(value as ProgrammingLanguage)}>
@@ -1049,10 +1189,12 @@ export const DiscoveryView: React.FC = React.memo(() => {
                     </SelectContent>
                   </Select>
                   
+                  {/* 语义模式由 AI 按相关性排序，排序选项无意义，禁用 */}
                   <CustomSelect
                     value={discoverySortBy}
                     onChange={(value) => setDiscoverySortBy(value as SortBy)}
                     ariaLabel={t('discoveryView.discovery-sort-field')}
+                    disabled={discoverySearchMode === 'semantic'}
                     options={[
                       { value: 'BestMatch', label: t('discoveryView.best-match') },
                       { value: 'MostStars', label: t('discoveryView.most-stars') },
@@ -1064,6 +1206,7 @@ export const DiscoveryView: React.FC = React.memo(() => {
                     value={discoverySortOrder}
                     onChange={(value) => setDiscoverySortOrder(value as SortOrder)}
                     ariaLabel={t('discoveryView.discovery-sort-order')}
+                    disabled={discoverySearchMode === 'semantic'}
                     options={[
                       { value: 'Descending', label: t('discoveryView.descending') },
                       { value: 'Ascending', label: t('discoveryView.ascending') },
@@ -1116,7 +1259,14 @@ export const DiscoveryView: React.FC = React.memo(() => {
                         {t('discoveryView.repo-search')}
                       </p>
                       <p className="text-sm text-muted-foreground dark:text-muted-foreground leading-relaxed">
-                        {t('discoveryView.enter-keywords-to-search-github-repositories')}
+                        {/* 仅当语义搜索真的给出了空态原因（召回为空/AI 判空）才显示语义空态文案：
+                            语义模式但回退到关键词搜索（如 AI 配置不完整）时 reason 为 null，
+                            此时显示通用关键词文案，不能宣称"语义召回为空" */}
+                        {discoverySearchMode === 'semantic' && discoverySearchQuery.trim() && discoverySearchEmptyReason
+                          ? (discoverySearchEmptyReason === 'ai_empty'
+                              ? t('discoveryView.semantic-empty-ai')
+                              : t('discoveryView.semantic-empty-recall'))
+                          : t('discoveryView.enter-keywords-to-search-github-repositories')}
                       </p>
                     </div>
                   </>
@@ -1275,7 +1425,7 @@ export const DiscoveryView: React.FC = React.memo(() => {
             )}
 
             {allRepos.length > 0 && (
-              <div className={isDesktopSafeMode ? 'space-y-3' : 'space-y-4'}>
+              <div className="app-flat-list app-discovery-list">
                 {allRepos.map((repo, index) => (
                   <div key={repo.id} data-repo-index={index}>
                     <SubscriptionRepoCard repo={repo} desktopSafeMode={isDesktopSafeMode} />

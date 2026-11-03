@@ -1,35 +1,34 @@
 
 import { TranslateFn } from '../../i18n/useT';
-import React from 'react';
-import { ExternalLink, Github, Globe, Key, Mail, Monitor, Package, Twitter } from 'lucide-react';
+import React, { useState } from 'react';
+import { ArrowRight, ExternalLink, Key, Mail, Monitor, Package } from 'lucide-react';
+import { Github, Twitter } from '../ui/brand-icons';
 import { UpdateChecker } from '../UpdateChecker';
 import { useAppStore } from '../../store/useAppStore';
 import { useShallow } from 'zustand/react/shallow';
 import { version } from '../../../package.json';
 import { PROJECT_REPO_URL } from '../../constants/project';
-import { APP_LANGUAGES, type AppLanguage } from '../../i18n/languages';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
-import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import { Switch } from '../ui/switch';
-import { ThemeSettingsCard } from './ThemeSettingsCard';
 import { useDesktopActions } from '../../features/settings/hooks/useDesktopActions';
 import { useGitHubTokenActions } from '../../features/settings/hooks/useGitHubTokenActions';
+import { GitHubTokenPermissions } from '../GitHubTokenPermissions';
 
 interface GeneralPanelProps {
   t: TranslateFn;
 }
 
 export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
-  const { language, setLanguage, user } = useAppStore(useShallow((state) => ({
-    language: state.language,
-    setLanguage: state.setLanguage,
+  const { user } = useAppStore(useShallow((state) => ({
     user: state.user,
   })));
   const desktop = useDesktopActions();
   const githubToken = useGitHubTokenActions();
+  const [guideOpen, setGuideOpen] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -38,7 +37,21 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
         <h3 className="text-lg font-semibold text-foreground dark:text-foreground">{t('generalPanel.general-settings')}</h3>
       </div>
 
-      <ThemeSettingsCard t={t} />
+      <Card>
+        <CardHeader>
+          <div className="flex items-center space-x-3">
+            <Package className="h-5 w-5 text-muted-foreground dark:text-muted-foreground" />
+            <CardTitle>{t('generalPanel.check-for-updates')}</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="mb-1 text-sm text-muted-foreground dark:text-muted-foreground">{t('generalPanel.current-version-v-version', { version: version })}</p>
+            <p className="text-xs text-muted-foreground dark:text-muted-foreground">{t('generalPanel.check-if-a-new-version-is-available')}</p>
+          </div>
+          <UpdateChecker />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -68,43 +81,21 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
           <Button type="button" onClick={() => { void githubToken.updateToken(); }} disabled={githubToken.isSaving || !githubToken.tokenInput.trim()}>
             {githubToken.isSaving ? t('generalPanel.updating') : t('generalPanel.update-token')}
           </Button>
+          <Button type="button" variant="link" className="mt-2 h-auto p-0 text-sm" onClick={() => setGuideOpen(true)}>
+            {t('generalPanel.token-permission-guide')}
+            <ArrowRight className="h-4 w-4" />
+          </Button>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center space-x-3">
-            <Globe className="h-5 w-5 text-muted-foreground dark:text-muted-foreground" />
-            <CardTitle id="language-settings-title">{t('generalPanel.language-settings')}</CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <RadioGroup
-            aria-labelledby="language-settings-title"
-            value={language}
-            onValueChange={(value) => setLanguage(value as AppLanguage)}
-            className="grid w-full grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-3"
-          >
-            {APP_LANGUAGES.map((definition) => (
-              <Label
-                key={definition.code}
-                htmlFor={`language-${definition.code}`}
-                className="flex cursor-pointer items-center gap-3 rounded-lg border border-border p-3 transition-colors hover:bg-background dark:border-border dark:hover:bg-card/[0.10]"
-              >
-                <RadioGroupItem value={definition.code} id={`language-${definition.code}`} aria-labelledby={`language-${definition.code}-label`} />
-                <span className="min-w-0">
-                  <span id={`language-${definition.code}-label`} className="block truncate text-sm font-medium text-foreground dark:text-foreground">
-                    {definition.nativeName}
-                  </span>
-                  <span className="mt-1 block truncate text-xs font-normal text-muted-foreground dark:text-muted-foreground">
-                    {definition.englishName}
-                  </span>
-                </span>
-              </Label>
-            ))}
-          </RadioGroup>
-        </CardContent>
-      </Card>
+      <Dialog open={guideOpen} onOpenChange={setGuideOpen}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('generalPanel.token-permission-guide')}</DialogTitle>
+          </DialogHeader>
+          <GitHubTokenPermissions heading={false} />
+        </DialogContent>
+      </Dialog>
 
       {desktop.supported && (
         <Card>
@@ -157,22 +148,6 @@ export const GeneralPanel: React.FC<GeneralPanelProps> = ({ t }) => {
           </CardContent>
         </Card>
       )}
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center space-x-3">
-            <Package className="h-5 w-5 text-muted-foreground dark:text-muted-foreground" />
-            <CardTitle>{t('generalPanel.check-for-updates')}</CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent className="flex items-center justify-between">
-          <div>
-            <p className="mb-1 text-sm text-muted-foreground dark:text-muted-foreground">{t('generalPanel.current-version-v-version', { version: version })}</p>
-            <p className="text-xs text-muted-foreground dark:text-muted-foreground">{t('generalPanel.check-if-a-new-version-is-available')}</p>
-          </div>
-          <UpdateChecker />
-        </CardContent>
-      </Card>
 
       <Card>
         <CardHeader>

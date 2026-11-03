@@ -680,4 +680,90 @@
     </changelog>
     <downloadUrl>https://github.com/AmintaCCCP/GithubStarsManager/releases/tag/v0.8.4</downloadUrl>
   </version>
+  <version>
+    <number>0.8.5</number>
+    <releaseDate>2026-10-01</releaseDate>
+    <changelog>
+      <item>build: Desktop installers slim down from ~180-190 MB to ~100 MB by packing only the single runtime dependency, with electron-builder.yml as the single shared build config for local and CI builds; the CI pipeline now builds the web bundle once, caches Electron binaries, and drops from ~8 minutes to ~3. (PR #412, PR #413)</item>
+      <item>feat: The &apos;Star from links&apos; dialog can preview a repository&apos;s README without leaving the dialog, and keeps the last 10 pasted texts per GitHub account as editable, reusable history. (contributed by @Khk-NL). (PR #414)</item>
+      <item>fix: Release asset filters now match and list downloads by the active keywords: include keywords no longer hit GitHub&apos;s auto-generated source archives, and matching releases list only the assets that hit the keywords, with a per-card &apos;show all&apos; toggle. (PR #415)</item>
+      <item>fix: WebDAV requests are routed through the backend proxy when a backend is available, fixing CORS &apos;Failed to fetch&apos; errors with servers that do not send CORS headers for DAV methods; connection tests accept inline credentials. (contributed by @lostiv). (PR #416)</item>
+      <item>feat: The login screen and General settings now include a GitHub token permission guide covering classic and fine-grained tokens, and batch starring shows a clear localized error when the token lacks Star permissions. (contributed by @Khk-NL). (PR #417)</item>
+      <item>fix: Batch-starred repositories keep their real GitHub IDs, so re-syncing no longer wipes AI summaries, AI tags, and category tags; previously affected data self-heals on the next sync via a full_name fallback match. (PR #418)</item>
+      <item>feat: Discovery supports adding custom external feeds from public HTTPS JSON/RSS/Atom sources of GitHub repository links, validated before saving, removable anytime, and never receiving the user&apos;s GitHub token (up to 10 feeds per user, 30 repositories per feed per load). (contributed by @Khk-NL). (PR #419)</item>
+      <item>feat: Plugin system V1.4 adds modal actions (opensPage) that open a plugin page inside a sandboxed modal with repository context, README delivery, clipboard-image, and save-file host operations, shipping the new &apos;Repo Info Card&apos; example plugin. (PR #420)</item>
+      <item>feat: Appearance, repository card display fields, and language settings move into a dedicated Appearance settings menu with checkmarks on selected card fields; the sidebar &apos;Plugins&apos; entry is renamed &apos;Plugin Management&apos;; vector search gains a dedicated index panel and an unindexed-count sidebar badge. (PR #421)</item>
+      <item>fix: The desktop app no longer probes file:///api/health on startup; README images in picture/srcset resolve correctly in dark themes with protocol-relative links forced to https; image downloads get proper MIME-based extensions; the plugin snapshot 64 MiB budget is now measured against sanitized data. (PR #422)</item>
+    </changelog>
+    <downloadUrl>https://github.com/AmintaCCCP/GithubStarsManager/releases/tag/v0.8.5</downloadUrl>
+  </version>
+  <version>
+    <number>0.8.6</number>
+    <releaseDate>2026-10-07</releaseDate>
+    <changelog>
+      <item>build: 升级各工作区 npm 构建工具链与依赖库至最新安全版本。(PR #423)</item>
+      <item>perf: IndexedDB 改用分片持久化与脏检查原子提交，开关弹窗等操作仅写轻量分片，消除 140MB 级序列化告警与卡顿。(PR #424)</item>
+      <item>fix: 优化桌面端 WebDAV 错误提示，在特定受限网络环境下平滑回退至 Chromium 网络栈。(PR #426)</item>
+      <item>feat: 社区插件注册表升级为插件市场，支持按源浏览、搜索、一键安装、更新及卸载，支持自定义添加维护外部 GitHub 插件源。(PR #427)</item>
+      <item>feat: 建立贯穿主进程、渲染端、后端与插件的全量诊断日志体系，敏感信息自动脱敏，支持导出诊断包与捕获出站请求台账。(PR #428)</item>
+      <item>fix: 对齐仓库问答面板中的代码块样式与 GitHub 设计语言，消除窄侧栏右缘截断。(PR #429)</item>
+      <item>fix: 升级 http-cache-semantics 至 4.3.0 修复 CVE-2026-93748 安全漏洞，加固测试隔离。(PR #430)</item>
+      <item>feat: README 阅读弹窗扩大至近全屏尺寸（四周各留 1rem 舒适边距），大幅提升长篇文档阅读体验。(PR #431)</item>
+      <item>feat: 全面重构仓库信息卡示例插件 UI，支持 Linear 设计风格、左右分栏、实时代码编辑/高亮预览、自由缩放平移与自定义画幅。(PR #432)</item>
+      <item>feat: 新增 V1.5 页面只读网络桥接能力，发布「仓库洞察」官方示例插件，提供提交动态、健康度雷达、贡献者与巴士因子分析看板。(PR #433)</item>
+      <item>fix: 修复仓库洞察插件图表竞态崩溃，完善 WebDAV PROPFIND 连接探测兼容性，并对超大持久化分片增加空闲写入节流。(PR #434)</item>
+      <item>fix: 修复仓库信息卡选择跟随界面语言时的本地化提示词覆盖问题，补充生成 Loading 动效与导出画幅校验。(PR #435)</item>
+    </changelog>
+    <downloadUrl>https://github.com/AmintaCCCP/GithubStarsManager/releases/tag/v0.8.6</downloadUrl>
+  </version>
+  <version>
+    <number>0.8.7</number>
+    <releaseDate>2026-10-17</releaseDate>
+    <changelog>
+      <item>feat: 推出 Cloudflare Vectorize 向量搜索跨平台一键终端交互式部署向导及双语配置指引。(PR #479)</item>
+      <item>fix: 全面修复 CodeQL 安全告警，增加接口限流、安全随机数生成、防 ReDoS 与危险协议拦截。(PR #478)</item>
+      <item>feat: 在外观设置中支持自定义仓库卡片快捷操作按钮的排序与显隐状态。(感谢 @Khk-NL 的贡献) (PR #467)</item>
+      <item>ci: 恢复手动控制版本号与手写更新日志，CI 打包前增加 draft release 守卫。(PR #466)</item>
+      <item>build: 桌面端打包安全加固，开启 asar 归档保护源码分发，全面治理构建工具链漏洞。(PR #464)</item>
+      <item>feat: 支持勾选单个或多个指定分类增量推送到 GitHub Lists。(感谢 @SlickShady96 的贡献) (PR #445)</item>
+      <item>UX: 仓库卡片取消 Star 操作移入更多菜单底部防误触，简化概况及问答计数提示。(感谢 @Khk-NL 的贡献) (PR #443)</item>
+      <item>fix: 修复 KaTeX 原型污染及 sharp 上游已知安全漏洞。(PR #442)</item>
+      <item>feat: 支持将局域网及本机地址设为自定义 AI 接入点并放行明文 HTTP 协议。(PR #441)</item>
+      <item>build: 强制升级 postcss-selector-parser 修复 CPU 耗尽 DoS 漏洞。(PR #447)</item>
+      <item>ci: CI 流水线加固治理，增加超时控制、零产物防漏拦截与服务端自动化测试。(PR #448)</item>
+      <item>build: 升级 Vite 8、React、Vitest 5、TailwindCSS 4、MCP SDK 1.32.1 等依赖至最新版本。(PR #436, #460, #462, #463, #468, #473, #476)</item>
+    </changelog>
+    <downloadUrl>https://github.com/AmintaCCCP/GithubStarsManager/releases/tag/v0.8.7</downloadUrl>
+  </version>
+  <version>
+    <number>0.8.8</number>
+    <releaseDate>2026-10-29</releaseDate>
+    <changelog>
+      <item>feat: 全面优化向量搜索重排流水线，免重建索引支持硅基流动 BAAI/bge-reranker-v2-m3 与 LLM 智能重排。(PR #505)</item>
+      <item>feat: 推出源画像相似仓库推荐流水线，大幅提升相似仓库关联召回质量与推荐精准度。(PR #507)</item>
+      <item>feat: 重构桌面端工作区布局（Workspace Shell），各模块配备独立上下文侧栏并拓宽有效工作区视窗。(PR #524)</item>
+      <item>feat: 发现页仓库搜索新增 AI 语义搜索模式，支持多语言意图扩展与文档域优先召回精选。(PR #494)</item>
+      <item>fix: 优化 Windows 托盘最小化调度机制，彻底解决从系统托盘恢复窗口卡死的问题。(PR #527)</item>
+      <item>fix: GitHub API 请求增加 30 秒超时控制与指数退避重试，解决休眠或断网后同步挂起问题，托盘新增「重启应用」。(PR #526)</item>
+      <item>fix: 修复全栈 Docker 容器在 Helmet CSP 与纯 HTTP 访问下脚本被拦截导致的白屏故障。(PR #481)</item>
+      <item>fix: 处置 CodeQL 存量安全告警，加固 RPC 输入参数校验与 SSRF 防护。(PR #498)</item>
+      <item>fix: 升级 undici 修复已知 CVE-2026-109869 安全漏洞，修复 hono 与 follow-redirects 依赖。(PR #495, #504)</item>
+      <item>build: 升级 Electron 45、Zustand 5、Better-SQLite3 13、Parse5 8、Date-fns 4 等核心依赖至最新版本。(PR #482-#493, #499-#503, #509-#520, #525)</item>
+    </changelog>
+    <downloadUrl>https://github.com/AmintaCCCP/GithubStarsManager/releases/tag/v0.8.8</downloadUrl>
+  </version>
+  <version>
+    <number>0.8.9</number>
+    <releaseDate>2026-10-30</releaseDate>
+    <changelog>
+      <item>fix: 紧急修复 Windows 窗口被遮挡或从托盘恢复后画面停止重绘导致的假死问题，新增强制重绘、合成器存活检测与主进程自动重载兜底。(PR #534)</item>
+      <item>feat: 发现页语义仓库搜索改用 GitHub Search 召回候选，候选池规模与质量大幅提升，AI 精排效果显著改善。(PR #535)</item>
+      <item>feat: Release 页新增内置「当前系统」资产过滤器，一键筛选当前设备可安装资产并推荐最佳下载。(PR #536)</item>
+      <item>fix: AI 分析与搜索兼容慢速、限流的 OpenAI 兼容网关，连接测试超时延长至 30 秒并正确识别网关错误与限流重试。(PR #529)</item>
+      <item>fix: 消除诊断日志高频噪音：插件快照资产上限、GitHub 403 刷屏、向量重复 ID 与超大持久化分片写入告警。(PR #530)</item>
+      <item>fix: 统一按钮与控件悬停反馈，强化侧边栏视觉层级。(PR #531)</item>
+      <item>fix: 升级 @hono/node-server 修复 serveStatic 路径二次解码绕过漏洞，升级 decode-uri-component 修复高危拒绝服务漏洞。(PR #528, #532)</item>
+    </changelog>
+    <downloadUrl>https://github.com/AmintaCCCP/GithubStarsManager/releases/tag/v0.8.9</downloadUrl>
+  </version>
 </versions>

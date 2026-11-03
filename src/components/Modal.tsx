@@ -18,10 +18,14 @@ interface ModalProps {
   title: string;
   children: React.ReactNode;
   maxWidth?: string;
+  fullscreen?: boolean;
   footer?: React.ReactNode;
   scrollable?: boolean;
+  contentClassName?: string;
   onPointerDownOutside?: DialogContentPointerDownOutsideHandler;
   onOverlayPointerDown?: React.PointerEventHandler<HTMLDivElement>;
+  onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>['onCloseAutoFocus'];
+  closeLabel?: string;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -30,10 +34,14 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   children,
   maxWidth = 'max-w-md',
+  fullscreen = false,
   footer,
   scrollable = false,
+  contentClassName,
   onPointerDownOutside,
   onOverlayPointerDown,
+  onCloseAutoFocus,
+  closeLabel,
 }) => {
   const { isScrolling, handleScroll } = useScrollbarFlash(isOpen);
 
@@ -44,7 +52,7 @@ export const Modal: React.FC<ModalProps> = ({
       </DialogHeader>
       <div
         data-testid="modal-scroll-area"
-        className={cn('min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-on-scroll', isScrolling && 'scrolling')}
+        className={cn('min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-on-scroll', isScrolling && 'scrolling', contentClassName)}
         onScroll={handleScroll}
       >
         {children}
@@ -68,11 +76,17 @@ export const Modal: React.FC<ModalProps> = ({
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         aria-describedby={undefined}
-        className={cn(maxWidth, scrollable && 'flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0')}
+        fullscreen={fullscreen}
+        className={cn(
+          scrollable && 'flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0',
+          !fullscreen && maxWidth,
+        )}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => event.stopPropagation()}
         onPointerDownOutside={onPointerDownOutside}
         onOverlayPointerDown={onOverlayPointerDown}
+        onCloseAutoFocus={onCloseAutoFocus}
+        closeLabel={closeLabel}
       >
         {content}
       </DialogContent>

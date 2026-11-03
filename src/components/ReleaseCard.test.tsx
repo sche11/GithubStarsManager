@@ -84,6 +84,8 @@ const renderCard = (props: Partial<Parameters<typeof ReleaseCard>[0]> = {}) => {
 describe('ReleaseCard asset updated indicator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 模块级 store 状态被所有用例共享：英文用例设置的 en 不得泄漏到后续用例
+    storeState.language = 'zh';
   });
 
   it('shows container-level and per-asset indicators from the same source (updated_asset_ids)', () => {
@@ -299,6 +301,32 @@ describe('ReleaseCard asset list filtering', () => {
     expect(screen.getByText('app.dmg')).toBeInTheDocument();
     expect(screen.getByText('app.exe')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /显示全部/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('ReleaseCard current-system asset badges', () => {
+  it('renders recommended, emulated and unverified badges with tooltips', () => {
+    const links = [
+      { name: 'App.dmg', url: 'https://example.com/App.dmg', size: 1, downloadCount: 0, assetId: 201 },
+      { name: 'App-x64.dmg', url: 'https://example.com/App-x64.dmg', size: 1, downloadCount: 0, assetId: 202 },
+      { name: 'App.zip', url: 'https://example.com/App.zip', size: 1, downloadCount: 0, assetId: 203 },
+    ];
+    renderCard({
+      downloadLinks: links,
+      assetBadges: new Map([
+        [links[0].url, 'recommended'],
+        [links[1].url, 'emulated'],
+        [links[2].url, 'unverified'],
+      ]),
+      currentPlatform: 'macos',
+    });
+
+    expect(screen.getByText('推荐')).toHaveAttribute('title', '与当前系统和架构精确匹配');
+    expect(screen.getByText('需转译')).toHaveAttribute('title', '将通过 Rosetta 2 运行');
+    expect(screen.getByText('平台未确认')).toHaveAttribute(
+      'title',
+      '文件名未声明平台，也无法根据同版本资产或仓库信息推断',
+    );
   });
 });
 

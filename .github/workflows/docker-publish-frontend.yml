@@ -4,20 +4,88 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'tsconfig.json'
+      - 'tsconfig.app.json'
+      - 'tsconfig.node.json'
+      - 'postcss.config.js'
+      - 'tailwind.config.js'
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/check-bundle-size.cjs'
+      - 'nginx.conf.template'
+      - '.github/workflows/docker-publish-frontend.yml'
   workflow_dispatch:
 
-# Keep only the newest run for each branch or tag, while allowing release tags
-# and main to publish independently.
+# Keep only the newest attempt for each PR. Non-PR runs get unique groups, and
+# the publish job below serializes registry writes without dropping revisions.
 concurrency:
-  group: frontend-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: frontend-image-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/github-stars-manager-frontend
 
 jobs:
+  validate:
+    if: github.event_name == 'pull_request'
+    # Pinned: `ubuntu-latest` migrates to Ubuntu 26.04 between 2026-10-19 and
+    # 2026-11-19 (actions/runner-images#14748).
+    runs-on: ubuntu-24.04
+    # Fork PRs can only read default-branch GHA caches, so a fork PR validate
+    # runs the full multi-arch build cold; keep the timeout above that.
+    timeout-minutes: 60
+    # PR validation does not authenticate to GHCR and cannot publish packages.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: false
+
+      - name: Validate frontend multi-architecture image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          # Fork PRs may fall back to the default branch's publish cache, so a
+          # cold fork PR reuses the latest main build layers instead of timing
+          # out on a from-scratch multi-arch build.
+          cache-from: |
+            type=gha,scope=github-stars-manager-frontend-pr,timeout=5m
+            type=gha,scope=github-stars-manager-frontend-branch,timeout=5m
+          cache-to: type=gha,scope=github-stars-manager-frontend-pr,mode=max,timeout=5m,ignore-error=true
+
   build-and-push:
+    # Only main and release tags may publish: pull_request runs validate only,
+    # and workflow_dispatch can target any branch, where a manual run must
+    # neither publish images nor overwrite the default branch's cache scope.
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    # Keep every main/tag revision pending instead of replacing older runs.
+    concurrency:
+      group: frontend-image-publish
+      cancel-in-progress: false
+      queue: max
     # Pinned: `ubuntu-latest` migrates to Ubuntu 26.04 between 2026-10-19 and
     # 2026-11-19 (actions/runner-images#14748).
     runs-on: ubuntu-24.04
@@ -29,7 +97,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -38,13 +106,15 @@ jobs:
         run: node scripts/check-release-version.cjs "$GITHUB_REF_NAME"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: false
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -55,9 +125,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            # branch push → "latest"
-            type=raw,value=latest,enable={{is_default_branch}}
             # tag push → "v1.2.3", "1.2.3", "1.2", "1"
             type=ref,event=tag
             type=semver,pattern={{version}}
@@ -67,7 +137,8 @@ jobs:
             type=sha,prefix=sha-
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -77,3 +148,23 @@ jobs:
           # Do not share the default `buildkit` scope with the backend image.
           cache-from: type=gha,scope=github-stars-manager-frontend-${{ github.ref_type }},timeout=5m
           cache-to: type=gha,scope=github-stars-manager-frontend-${{ github.ref_type }},mode=max,timeout=5m,ignore-error=true
+
+      - name: Move latest to this build when it is current main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current_sha" != "$CANDIDATE_SHA" ]; then
+            echo "Skipping latest: $CANDIDATE_SHA is not the current main head ($current_sha)."
+            exit 0
+          fi
+          test -n "$DIGEST"
+          image="${REGISTRY}/${IMAGE_NAME,,}"
+          docker buildx imagetools create \
+            --tag "${image}:latest" \
+            "${image}@${DIGEST}"

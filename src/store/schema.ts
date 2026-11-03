@@ -83,6 +83,7 @@ export type PersistedAppState = Partial<
     | 'assetFilters'
     | 'trendingSnapshots'
     | 'repositoryCardFields'
+    | 'repositoryCardActions'
     | 'theme'
     | 'themePreset'
     | 'currentView'
@@ -183,7 +184,9 @@ export const normalizeRepositoryChatSettings = (value: unknown): RepositoryChatS
     streamingMode: record.streamingMode === 'off' ? 'off' : 'auto',
     taskDepth,
     enableWebTools: record.enableWebTools === true,
+    fastPath: record.fastPath !== false,
     enableAgentToolLoop: record.enableAgentToolLoop === true,
+    layout: record.layout === 'fullscreen' ? 'fullscreen' : 'sheet',
     retainSessionDays,
     maxToolsPerTurn: maxToolCalls,
     agentBudget,

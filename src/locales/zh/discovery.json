@@ -1,11 +1,35 @@
 {
+  "externalFeeds": {
+    "manage": "外部发现频道",
+    "manageRss": "RSS 发现频道",
+    "name": "频道名称",
+    "url": "HTTPS 地址",
+    "add": "添加频道",
+    "checking": "正在检查来源…",
+    "copy": "复制",
+    "copied": "已复制",
+    "rssFormat": "粘贴一个公开的 RSS/Atom 订阅地址，应用会解析其中提到的 GitHub 仓库链接（每次最多取前 30 个）。",
+    "rss-invalid": "RSS 中未找到 GitHub 仓库链接。",
+    "remove": "移除 {{name}}",
+    "format": "粘贴一个公开的 HTTPS 地址，其返回的 JSON 需在 repositories 字段中列出 GitHub 仓库链接，最多 30 个公开仓库。",
+    "cors-note": "来源网站须允许浏览器跨域读取（CORS）；不会向其发送 GitHub Token。",
+    "invalid": "请输入频道名称和有效的 HTTPS 地址。",
+    "duplicate": "该来源已添加，或已达到 10 个频道上限。",
+    "invalid-format": "来源 JSON 不包含有效的仓库列表。",
+    "cors": "无法读取来源；请检查地址及网站的跨域设置。",
+    "unreadable": "无法读取来源；请检查地址、网站状态及 JSON 格式。"
+  },
   "discoverySidebar": {
     "just-now": "刚刚",
     "m-ago": "分钟前",
     "h-ago": "小时前",
+    "discovery-label": "发现",
     "discovery-channels": "发现频道",
     "manage-channels": "管理发现频道",
-    "refresh-all": "刷新全部"
+    "refresh-all": "刷新全部",
+    "channels-section": "频道",
+    "sources-section": "发现来源",
+    "channel-count": "{{count}} 条内容"
   },
   "discoveryView": {
     "all-loaded": "已加载全部",
@@ -80,7 +104,21 @@
     "retry": "重试",
     "platform-filter-v1": "平台筛选：{{v1}}",
     "items-count": "{{currentCount}} 项",
-    "items-count-with-total": "{{currentCount}} 项（共 {{totalCount}} 项）"
+    "items-count-with-total": "{{currentCount}} 项（共 {{totalCount}} 项）",
+    "search-mode": "搜索模式",
+    "search-mode-keyword": "关键词",
+    "search-mode-semantic": "AI 语义",
+    "search-mode-semantic-placeholder": "用自然语言描述想找的仓库，如：管理 Markdown 笔记的命令行工具",
+    "search-mode-hint": "AI 语义搜索通过全网公开代码匹配寻找仓库（仅 GitHub 仓库），需配置 AI 服务",
+    "search-phase-expanding": "AI 分析查询…",
+    "search-phase-recalling": "全网词法召回…",
+    "search-phase-enriching": "补全仓库信息…",
+    "search-phase-reranking": "AI 精选排序…",
+    "semantic-rate-limited": "触发代码搜索限流（429），请稍后重试",
+    "semantic-no-ai-config": "未配置 AI 服务，已回退关键词搜索",
+    "semantic-fallback-toast": "AI 精选失败，已按词法命中排序",
+    "semantic-empty-recall": "全网代码中未匹配到相关仓库，试试更具体的技术关键词",
+    "semantic-empty-ai": "AI 未找到相关仓库，可换个说法或补充技术关键词"
   },
   "weeklyIssueModal": {
     "submission-v1": "投稿 #{{v1}}",
@@ -150,5 +188,4 @@
     "stars-gained": "自首次记录新增 {{v1}} stars",
     "first-seen": "榜首首次记录于{{v1}}"
   }
-
 }

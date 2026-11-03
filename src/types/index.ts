@@ -3,6 +3,8 @@ import type { AppLanguage } from '../i18n/languages';
 
 import type { RepositoryCardFields } from './repositoryCardFields';
 export type { RepositoryCardFieldId, RepositoryCardFields } from './repositoryCardFields';
+import type { RepositoryCardActionPreference } from './repositoryCardActions';
+export type { RepositoryCardActionId, RepositoryCardActionPreference } from './repositoryCardActions';
 import type { RepositoryChatSettings } from './repositoryChat';
 export type { RepositoryChatSettings } from './repositoryChat';
 import type { ThemeTokens } from './themeTokens';
@@ -345,6 +347,8 @@ export interface AIConfig {
   concurrency?: number; // AI分析并发数，默认为1
   requestsPerMinute?: number; // 每分钟 AI 请求数上限（供批量分析的共享限流器使用），0/缺省=不限制
   reasoningEffort?: AIReasoningEffort; // OpenAI GPT-5/Responses 可选 reasoning 强度
+  /** 问答内部 JSON 步骤（理解/规划/gate）是否关闭思考；默认 true，不暴露 UI。仅对有请求级关闭开关的供应商生效：OpenAI gpt-5.1+ 发送 reasoning.effort:'none'，DeepSeek/MiMo 发送 thinking:'disabled'；其余供应商无关闭参数，保持原有请求形态（Claude 默认不开启思考；Gemini 2.5 默认开启且当前请求不发送 thinkingConfig）。 */
+  disableThinkingForInternalSteps?: boolean;
   mimoPlan?: MiMoPlan; // MiMo 渠道：api（按量付费）或 token-plan（订阅制）
   supportsToolCalls?: boolean; // 端点/模型支持 OpenAI 风格 function calling（仓库问答工具循环用，默认关闭）
   apiKeyStatus?: SecretStatus;
@@ -501,6 +505,8 @@ export interface AppState {
   repositoryViewMode: 'grid' | 'list';
   /** 仓库卡片显示哪些字段（开发守则 §14）：只保存声明式开关 */
   repositoryCardFields: RepositoryCardFields;
+  /** Quick-action order and toolbar visibility; hidden actions remain in the menu. */
+  repositoryCardActions: RepositoryCardActionPreference[];
 
   // Theme tokens（开发守则 §14）：声明式外观偏好，落到 <html> 的 CSS 变量上
   themeTokens: ThemeTokens;
@@ -626,6 +632,14 @@ export interface AppState {
   discoverySortBy: SortBy;
   discoverySortOrder: SortOrder;
   discoverySearchQuery: string;
+  /** 仓库搜索模式：keyword=关键词（默认，行为不变）；semantic=AI 语义（全网仓库） */
+  discoverySearchMode: 'keyword' | 'semantic';
+  /** 语义搜索当前阶段（会话级，不持久化；原始阶段 id：expanding/recalling/enriching/reranking，null=不在搜索中） */
+  discoverySearchPhase: string | null;
+  /** 当前阶段的补充明细（如补全计数 "30/60"；会话级，不持久化） */
+  discoverySearchPhaseDetail: string | null;
+  /** 语义搜索空态原因（会话级，不持久化；recall_empty=召回为空，ai_empty=AI 判定空） */
+  discoverySearchEmptyReason: 'recall_empty' | 'ai_empty' | null;
   discoverySelectedTopic: TopicCategory | null;
   discoveryHasMore: Record<DiscoveryChannelId, boolean>;
   discoveryNextPage: Record<DiscoveryChannelId, number>;
@@ -722,7 +736,7 @@ export type SortBy = 'BestMatch' | 'MostStars' | 'MostForks';
 
 export type SortOrder = 'Descending' | 'Ascending';
 
-export type DiscoveryChannelId = 'trending' | 'hot-release' | 'most-popular' | 'topic' | 'x-tweet' | 'telegram' | 'weekly' | 'search' | 'code-search';
+export type DiscoveryChannelId = 'trending' | 'hot-release' | 'most-popular' | 'topic' | 'x-tweet' | 'telegram' | 'weekly' | 'search' | 'code-search' | `external:${string}`;
 
 export type DiscoveryChannelIcon = 'trending' | 'rocket' | 'star' | 'tag' | 'tweet' | 'telegram' | 'weekly' | 'search';
 
@@ -792,6 +806,9 @@ export interface TelegramRef {
   createdAt: string;
 }
 
+/** User-configured external discovery source formats. */
+export type ExternalFeedKind = 'json' | 'rss';
+
 export interface DiscoveryChannel {
   id: DiscoveryChannelId;
   name: string;
@@ -799,6 +816,10 @@ export interface DiscoveryChannel {
   icon: DiscoveryChannelIcon;
   description: string;
   enabled: boolean;
+  /** User-configured, public feed; only present for external channels. */
+  sourceUrl?: string;
+  /** Feed format of `sourceUrl`; omitted means the default JSON format. */
+  sourceKind?: ExternalFeedKind;
 }
 
 export interface PaginatedDiscoveryRepositories {

@@ -22,7 +22,72 @@ import {
   WorkflowDefinition,
 } from '../types';
 import { logger } from './logger';
+import { redactInline } from '../utils/logSanitizer';
 import { isReadmeCandidateItem, type GitHubReadmeCandidateItem } from '../utils/readmeVariants';
+import { secureRandomString } from '../utils/cryptoRandom';
+import { createCombinedAbortController } from '../utils/abortUtils';
+
+// 单次 fetch 尝试的超时：断网/睡眠时挂起的连接不会自行 reject，
+// 没有超时会让上层同步流程永远等待，刷新按钮一直处于禁用状态。
+const REQUEST_TIMEOUT_MS = 30_000;
+const TIMEOUT_ERROR_MESSAGE = `GitHub API request timed out after ${REQUEST_TIMEOUT_MS}ms`;
+const SAFE_METHODS = new Set(['GET', 'HEAD']);
+const GITHUB_SEARCH_INTERVAL_MS = 2100;
+// 发布刷新批次的总等待上限：单请求最坏约 127s（4 次 ×30s + 退避），
+// 没有批次上限时持续断网会让刷新一直占住。超预算后跳过剩余仓库，
+// 已完成的仓库结果照常返回，跳过的仓库不推进 watermark、下次刷新重试。
+const REFRESH_BATCH_BUDGET_MS = 10 * 60_000;
+
+/** 超时中止与用户主动取消都表现为 AbortError；父信号未中止时才算超时。 */
+function isTimeoutAbort(error: unknown, parentSignal: AbortSignal | undefined): boolean {
+  return (error as { name?: string } | null)?.name === 'AbortError' && !parentSignal?.aborted;
+}
+
+/** 退避等待，可被父信号中止。 */
+function delayWithAbort(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('Aborted'));
+    };
+    const timeoutId = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener('abort', onAbort);
+    if (signal?.aborted) onAbort();
+  });
+}
+
+// Search has a separate, per-token quota bucket. Keep every /search/* caller
+// on one timeline so discovery recall cannot race issue search or other tools.
+let githubSearchPacingIntervalMs = GITHUB_SEARCH_INTERVAL_MS;
+const nextGithubSearchAtByToken = new Map<string, number>();
+
+/** Test hook: disable pacing for ordinary unit tests, or install a test interval. */
+export function __setGithubSearchPacingForTest(intervalMs: number): void {
+  githubSearchPacingIntervalMs = Math.max(0, intervalMs);
+  nextGithubSearchAtByToken.clear();
+}
+
+async function waitForGithubSearchSlot(token: string, signal?: AbortSignal): Promise<void> {
+  if (githubSearchPacingIntervalMs <= 0) return;
+  const now = Date.now();
+  const scheduledAt = Math.max(now, nextGithubSearchAtByToken.get(token) ?? 0);
+  const reservedUntil = scheduledAt + githubSearchPacingIntervalMs;
+  nextGithubSearchAtByToken.set(token, reservedUntil);
+  if (scheduledAt <= now) return;
+  try {
+    await delayWithAbort(scheduledAt - now, signal);
+  } catch (error) {
+    // Release the unused slot if no later request has claimed it.
+    if (nextGithubSearchAtByToken.get(token) === reservedUntil) {
+      nextGithubSearchAtByToken.set(token, scheduledAt);
+    }
+    throw error;
+  }
+}
 
 interface GitHubContentResponse {
   content?: string;
@@ -154,6 +219,33 @@ interface GitHubRateLimitResponse {
   };
 }
 
+/**
+ * 把(通常是 RSS `content:encoded` 里的 README 渲染 HTML)文本解码为纯文本。
+ *
+ * 必须用 DOMParser 而不是给 detached 节点赋 `innerHTML`:后者在解析时浏览器
+ * 仍会立即发起 `<img>`/`<picture><source>` 的资源请求——GitHub Trending RSS
+ * 的 description 正是趋势仓库 README 的渲染 HTML,其中的相对路径图片在桌面端
+ * 会按 `file://…/dist/` 文档根解析,每次刷新趋势都产生一波必然
+ * `ERR_FILE_NOT_FOUND` 的请求。
+ *
+ * DOMParser 生成的文档没有 browsing context(base URL 是 `about:blank`),
+ * 相对资源 URL 无法解析成可请求地址;已在 Electron 44/Chromium 152 实测,
+ * 解析阶段对绝对 URL 的 img/source/iframe 同样零请求。移除资源承载元素后
+ * 再取文本作为跨引擎兜底,不依赖各引擎对惰性文档的取图时机。
+ */
+function decodeRssHtmlToText(html: string): string {
+  if (!html) return '';
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll(
+      'img, source, iframe, frame, video, audio, embed, object, link, script, style',
+    ).forEach((el) => el.remove());
+    return doc.body.textContent || '';
+  } catch {
+    return '';
+  }
+}
+
 /** 把 REST issue 条目归一化为 GitHubIssueListRead（labels 对象数组展开为 name）。 */
 function mapRestIssueListItem(item: Record<string, unknown>): GitHubIssueListRead {
   const labels = Array.isArray(item.labels)
@@ -242,9 +334,11 @@ function mapGraphqlRepoDetail(node: Record<string, unknown>): GitHubRepoDetailRe
     disabled: node.isDisabled === true,
     fork: node.isFork === true,
     is_template: node.isTemplate === true,
+    // GraphQL schema 已移除 openIssues 字段，fragment 改请求 issues(states: OPEN) { totalCount }，
+    // 语义等价（均只统计 open issue）；字段缺省时兜底为 0，与 REST 路径 mapRestRepoDetail 一致
     open_issues_count:
-      typeof (node.openIssues as { totalCount?: unknown } | undefined)?.totalCount === 'number'
-        ? (node.openIssues as { totalCount: number }).totalCount
+      typeof (node.issues as { totalCount?: unknown } | undefined)?.totalCount === 'number'
+        ? (node.issues as { totalCount: number }).totalCount
         : 0,
     default_branch:
       typeof (node.defaultBranchRef as { name?: unknown } | null | undefined)?.name === 'string'
@@ -254,9 +348,35 @@ function mapGraphqlRepoDetail(node: Record<string, unknown>): GitHubRepoDetailRe
 }
 
 const GITHUB_API_BASE = 'https://api.github.com';
+// 会话级 403 去重：README/Release/Gist 等生产路径按操作新建 service 实例，
+// 实例级状态会让同一 403 在同一会话内重复 warn。按「凭据 + 后端上下文」的
+// 非敏感指纹分桶（指纹仅用于判断凭据是否变化，绝不写入日志），凭据切换后
+// 自然换桶重新 warn。
+const warned403RequestsByContext = new Map<string, Set<string>>();
+const credentialContextFingerprint = (value: string): string => {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+/** 仅供测试重置会话级 403 去重状态，避免模块级状态跨用例泄漏。 */
+export function __reset403WarnStateForTest(): void {
+  warned403RequestsByContext.clear();
+}
 // Sentinel message for the 401 thrown above; callers match on it to tell a
 // confirmed auth failure apart from network/rate-limit/5xx errors.
 export const GITHUB_TOKEN_INVALID_ERROR = 'GitHub token expired or invalid';
+
+/** GitHub accepted the token, but it lacks permission for this request. */
+export class GitHubTokenPermissionError extends Error {
+  constructor() {
+    super('Resource not accessible by personal access token');
+    this.name = 'GitHubTokenPermissionError';
+  }
+}
 // Sentinel for 401s produced by the backend proxy's own auth middleware (its
 // body carries code: 'UNAUTHORIZED'). Kept distinct from the GitHub sentinel
 // so callers can tell a stale backend API key from a dead GitHub token.
@@ -366,13 +486,45 @@ export class GitHubApiService {
     return headers;
   }
 
+  // 403 多来自无 token/低速率限制的周期性探测，属于持续噪音：同一（凭据上下文,
+  // 后端路由, method, endpoint, 失败原因）只 warn 一次，重复失败降级为 debug。
+  // 键含失败原因，新出现的不同 403 成因仍可 warn。仅影响日志，不改变抛错行为。
+  private log403Failure(
+    message: string,
+    meta: { method: string; endpoint: string; status: number; durationMs: number },
+  ): void {
+    // message 可能来自代理/后端响应体，写入日志与去重键前先做内联脱敏。
+    const safeMessage = redactInline(message);
+    const contextKey = credentialContextFingerprint(
+      `${this.token}\u0000${this.backendAuthToken ?? ''}\u0000${this.backendUrl ?? ''}`,
+    );
+    let warned403Requests = warned403RequestsByContext.get(contextKey);
+    if (!warned403Requests) {
+      warned403Requests = new Set();
+      warned403RequestsByContext.set(contextKey, warned403Requests);
+    }
+    const warnKey = `${this.backendUrl ?? 'direct'} ${meta.method} ${meta.endpoint} ${safeMessage}`;
+    if (warned403Requests.has(warnKey)) {
+      logger.debug('githubApi', `${safeMessage} (deduplicated)`, meta);
+    } else {
+      warned403Requests.add(warnKey);
+      logger.warn('githubApi', safeMessage, meta);
+    }
+  }
+
   private async makeRequest<T>(endpoint: string, options: RequestInit & { operationTag?: string } = {}, signal?: AbortSignal): Promise<T> {
     const startTime = Date.now();
     const method = (options.method || 'GET') as string;
     const { operationTag, ...fetchOptions } = options;
+    // Search API 有独立配额桶（认证态 30/min），核心桶的剩余量/重置时间对它不适用：
+    // 共用状态会让多查询召回每条都等满一个重置窗口，也会让 search 的剩余量污染核心桶。
+    const isSearchEndpoint = endpoint.startsWith('/search/');
+    if (isSearchEndpoint) {
+      await waitForGithubSearchSlot(this.token, signal);
+    }
 
     // Check rate limit before making request
-    if (this.rateLimitRemaining !== null && this.rateLimitRemaining < 100 && this.rateLimitReset !== null) {
+    if (!isSearchEndpoint && this.rateLimitRemaining !== null && this.rateLimitRemaining < 100 && this.rateLimitReset !== null) {
       const waitMs = (this.rateLimitReset * 1000) - Date.now();
       if (waitMs > 0) {
         logger.warn('githubApi', 'Rate limit low, waiting for reset', { remaining: this.rateLimitRemaining, resetTime: this.rateLimitReset });
@@ -399,9 +551,13 @@ export class GitHubApiService {
     // GitHub 的 gist 等端点偶发 502/503/504（网关瞬时故障），这里对 5xx 做指数退避重试，
     // 退避策略与 backendAdapter.fetchWithRetry 保持一致（1s/2s/4s，最多重试 3 次）。
     const maxRetries = 3;
+    const isSafeMethod = SAFE_METHODS.has(method.toUpperCase());
     let response: Response | undefined;
+    let data: T | null | undefined;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const viaProxy = this.backendUrl != null;
+      // 每次尝试独立超时：超时上限不被重试+退避消耗（与 githubListsApi 一致）
+      const timeoutController = createCombinedAbortController(signal, REQUEST_TIMEOUT_MS);
       try {
         if (this.backendUrl) {
           // 通过 egress 代理路由：POST {egressUrl}/proxy/github/{endpoint}?query
@@ -421,14 +577,14 @@ export class GitHubApiService {
 
           response = await fetch(proxyUrl, {
             method: 'POST',
-            signal,
+            signal: timeoutController.signal,
             headers: this.getBackendHeaders(),
             body: JSON.stringify(proxyBody),
           });
         } else {
           response = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
             ...fetchOptions,
-            signal,
+            signal: timeoutController.signal,
             headers: {
               'Authorization': `Bearer ${this.token}`,
               'Accept': 'application/vnd.github.v3+json',
@@ -437,8 +593,16 @@ export class GitHubApiService {
             },
           });
         }
-      } catch (fetchError) {
+      } catch (caughtError) {
+        const timedOut = isTimeoutAbort(caughtError, signal);
+        const fetchError = timedOut ? new Error(TIMEOUT_ERROR_MESSAGE) : caughtError;
         const durationMs = Date.now() - startTime;
+        // 非幂等请求超时可能已在服务端生效，重试会造成重复副作用
+        // （如重复创建 gist / 重复触发 workflow），直接抛出。
+        if (timedOut && !isSafeMethod) {
+          logger.error('githubApi', 'API request timed out, not retrying non-idempotent method', { method, endpoint, durationMs, attempt: attempt + 1 });
+          throw fetchError;
+        }
         // 网络错误（连接断开、DNS 超时、socket hang-up 等）视为可重试的瞬时故障，
         // 仅在最后一次尝试时抛出；之前的尝试会继续走指数退避重试。
         if (attempt === maxRetries || signal?.aborted) {
@@ -447,33 +611,35 @@ export class GitHubApiService {
         }
         logger.warn('githubApi', 'API request network error, retrying', { method, endpoint, attempt: attempt + 1, maxRetries: maxRetries + 1, durationMs, error: fetchError instanceof Error ? fetchError.message : String(fetchError) });
         const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => {
-            clearTimeout(timeoutId);
-            signal?.removeEventListener('abort', onAbort);
-            reject(new Error('Aborted'));
-          };
-          const timeoutId = setTimeout(() => {
-            signal?.removeEventListener('abort', onAbort);
-            resolve();
-          }, delayMs);
-          signal?.addEventListener('abort', onAbort);
-          if (signal?.aborted) onAbort();
-        });
+        await delayWithAbort(delayMs, signal);
         continue;
       }
 
       // Parse rate limit headers
       const remaining = response.headers.get('X-RateLimit-Remaining');
       const reset = response.headers.get('X-RateLimit-Reset');
-      if (remaining !== null) {
+      if (!isSearchEndpoint && remaining !== null) {
         this.rateLimitRemaining = parseInt(remaining, 10);
       }
-      if (reset !== null) {
+      if (!isSearchEndpoint && reset !== null) {
         this.rateLimitReset = parseInt(reset, 10);
       }
 
-      if (response.ok) break;
+      if (response.ok) {
+        try {
+          data = response.status === 204 ? null : await response.json() as T;
+          break;
+        } catch (bodyError) {
+          const timedOut = isTimeoutAbort(bodyError, signal);
+          // 响应体停滞同样只对幂等读请求重试；写请求可能已成功，不能重放。
+          if (!timedOut || !isSafeMethod || attempt === maxRetries || signal?.aborted) {
+            throw timedOut ? new Error(TIMEOUT_ERROR_MESSAGE) : bodyError;
+          }
+          logger.warn('githubApi', 'API response body timed out, retrying', { method, endpoint, attempt: attempt + 1, maxRetries: maxRetries + 1 });
+          await delayWithAbort(Math.min(1000 * Math.pow(2, attempt), 4000), signal);
+          continue;
+        }
+      }
 
       const durationMs = Date.now() - startTime;
       if (response.status === 401) {
@@ -482,25 +648,48 @@ export class GitHubApiService {
           // The proxy forwards upstream GitHub bodies verbatim, while the
           // backend's own auth middleware marks its 401s with code
           // 'UNAUTHORIZED'. Only the latter is a backend API key problem.
-          const body = await response.json().catch(() => null) as { code?: string } | null;
+          let body: { code?: string } | null = null;
+          try {
+            body = await response.json() as { code?: string } | null;
+          } catch (bodyError) {
+            // 响应体读取超时不能吞成 "token 无效"，如实抛超时错误。
+            if (isTimeoutAbort(bodyError, signal)) throw new Error(TIMEOUT_ERROR_MESSAGE);
+          }
           if (body?.code === 'UNAUTHORIZED') {
             throw new Error(BACKEND_PROXY_UNAUTHORIZED_ERROR);
           }
         }
         throw new Error(GITHUB_TOKEN_INVALID_ERROR);
       }
-      if (response.status === 403 && this.rateLimitRemaining === 0) {
-        const resetDate = this.rateLimitReset
-          ? new Date(this.rateLimitReset * 1000).toLocaleString()
+      if (response.status === 403 && remaining === '0') {
+        // Search has its own quota bucket: read the reset from the current
+        // response, since this.rateLimitReset only tracks the core bucket.
+        const resetEpoch = isSearchEndpoint ? parseInt(reset ?? '', 10) : this.rateLimitReset;
+        const resetDate = resetEpoch
+          ? new Date(resetEpoch * 1000).toLocaleString()
           : 'unknown';
-        logger.warn('githubApi', 'API request failed: rate limit exceeded', { method, endpoint, status: response.status, durationMs });
+        this.log403Failure('API request failed: rate limit exceeded', { method, endpoint, status: response.status, durationMs });
         throw new Error(`GitHub API rate limit exceeded. Resets at ${resetDate}`);
+      }
+      if (response.status === 403) {
+        const body = await response.clone().json().catch(() => null) as { message?: string } | null;
+        if (body?.message === 'Resource not accessible by personal access token') {
+          this.log403Failure('API request failed: token permission', { method, endpoint, status: response.status, durationMs });
+          throw new GitHubTokenPermissionError();
+        }
       }
 
       // 5xx 视为可重试的瞬时故障；其余 4xx 直接抛出（重试无意义）。
       const isRetryable = response.status >= 500 && response.status <= 599;
       if (!isRetryable || attempt === maxRetries) {
-        logger.warn('githubApi', 'API request failed', { method, endpoint, status: response.status, durationMs });
+        const failureMeta = { method, endpoint, status: response.status, durationMs };
+        if (response.status === 403) {
+          // 与 log403Failure 的键约定一致：失败原因取响应体 message，不同成因各自 warn 一次。
+          const failureBody = await response.clone().json().catch(() => null) as { message?: string } | null;
+          this.log403Failure(failureBody?.message || 'API request failed', failureMeta);
+        } else {
+          logger.warn('githubApi', 'API request failed', failureMeta);
+        }
         throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
       }
 
@@ -511,19 +700,7 @@ export class GitHubApiService {
       }
       const delayMs = Math.min(1000 * Math.pow(2, attempt), 4000);
       logger.warn('githubApi', 'API request failed, retrying', { method, endpoint, status: response.status, attempt: attempt + 1, maxRetries: maxRetries + 1, delayMs, durationMs });
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          clearTimeout(timeoutId);
-          signal?.removeEventListener('abort', onAbort);
-          reject(new Error('Aborted'));
-        };
-        const timeoutId = setTimeout(() => {
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-        }, delayMs);
-        signal?.addEventListener('abort', onAbort);
-        if (signal?.aborted) onAbort();
-      });
+      await delayWithAbort(delayMs, signal);
     }
 
     // 循环正常退出时 response 一定已赋值（最后一次成功 break 或在循环内抛出）。
@@ -557,11 +734,9 @@ export class GitHubApiService {
       });
     }
 
-    const data = finalResponse.status === 204 ? null : await finalResponse.json();
-
     // 如果是starred repositories的响应，需要处理特殊格式
     if (endpoint.includes('/user/starred') && Array.isArray(data)) {
-      return data.map((item: GitHubStarredItem) => {
+      return (data as GitHubStarredItem[]).map((item) => {
         // 如果使用了star+json格式，数据结构会不同
         if (item.starred_at && item.repo) {
           return {
@@ -578,7 +753,7 @@ export class GitHubApiService {
       }) as T;
     }
 
-    return data;
+    return data as T;
   }
 
   async getCurrentUser(): Promise<GitHubUser> {
@@ -1326,7 +1501,9 @@ export class GitHubApiService {
         const [owner, name] = fullName.split('/');
         return `a${idx}: repository(owner: "${escapeGraphQlString(owner)}", name: "${escapeGraphQlString(name)}") { ...WeeklyRepoDetailFragment }`;
       });
-      const query = `query WeeklyRepoBatch {\n${aliases.join('\n')}\n}\nfragment WeeklyRepoDetailFragment on Repository {\n  databaseId\n  name\n  nameWithOwner\n  description\n  url\n  stargazerCount\n  forkCount\n  primaryLanguage { name }\n  createdAt\n  updatedAt\n  pushedAt\n  repositoryTopics(first: 20) { nodes { topic { name } } }\n  owner { login avatarUrl }\n  licenseInfo { spdxId }\n  isArchived\n  isDisabled\n  isFork\n  isTemplate\n  openIssues { totalCount }\n  defaultBranchRef { name }\n}`;
+      // 注意：GitHub schema 已移除 openIssues 字段（实测报 undefinedField），改用语义等价的
+      // issues(states: OPEN) { totalCount }，mapGraphqlRepoDetail 消费端同步改为读 node.issues
+      const query = `query WeeklyRepoBatch {\n${aliases.join('\n')}\n}\nfragment WeeklyRepoDetailFragment on Repository {\n  databaseId\n  name\n  nameWithOwner\n  description\n  url\n  stargazerCount\n  forkCount\n  primaryLanguage { name }\n  createdAt\n  updatedAt\n  pushedAt\n  repositoryTopics(first: 20) { nodes { topic { name } } }\n  owner { login avatarUrl }\n  licenseInfo { spdxId }\n  isArchived\n  isDisabled\n  isFork\n  isTemplate\n  issues(states: OPEN) { totalCount }\n  defaultBranchRef { name }\n}`;
       const response = await this.makeRequest<{ data?: Record<string, unknown> | null; errors?: Array<{ message?: string }> }>(
         '/graphql',
         {
@@ -1358,6 +1535,8 @@ export class GitHubApiService {
     options: ReleaseFetchOptions = {}
   ): Promise<MultipleReleasesResult> {
     const startTime = Date.now();
+    // 用单调时钟，避免系统时钟回拨导致批次预算失效；startTime 仅用于日志。
+    const batchDeadline = performance.now() + REFRESH_BATCH_BUDGET_MS;
     const { includePreRelease = true, refreshExistingAssets = false } = options;
     const allReleases: Release[] = [];
     const latestReleases: Release[] = [];
@@ -1373,6 +1552,14 @@ export class GitHubApiService {
         if (currentIndex >= repositories.length) break;
 
         const repo = repositories[currentIndex];
+        if (performance.now() >= batchDeadline) {
+          failedRepos.push({
+            repoId: repo.id,
+            full_name: repo.full_name,
+            error: `刷新批次超过 ${REFRESH_BATCH_BUDGET_MS / 60_000} 分钟上限，已跳过以保留已完成结果`,
+          });
+          continue;
+        }
         const [owner, name] = repo.full_name.split('/');
 
         try {
@@ -1622,10 +1809,10 @@ export class GitHubApiService {
         // 仅用于下方提取 stars/forks 标记，绝不写入 repo.description
         const descriptionEl = item.querySelector('description');
         let readmeText = descriptionEl?.textContent || '';
-        // 解码 HTML 实体
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = readmeText;
-        readmeText = tempDiv.textContent || tempDiv.innerText || readmeText;
+        // 解码 HTML 实体（禁止走 innerHTML：detached 节点赋值仍会解析并立即
+        // 发起 <img>/<source> 资源请求，趋势仓库 README 的相对路径图片在桌面端
+        // 会按 file:// 文档根解析，每次刷新趋势都产生一波 file 404）
+        readmeText = decodeRssHtmlToText(readmeText) || readmeText;
         // 清理多余空白
         readmeText = readmeText.replace(/\s+/g, ' ').trim();
 
@@ -1831,10 +2018,8 @@ export class GitHubApiService {
         // 仅用于下方提取 stars/forks 标记，绝不写入 repo.description
         const descriptionEl = item.querySelector('description');
         let readmeText = descriptionEl?.textContent || '';
-        // Decode HTML entities and strip HTML tags
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = readmeText;
-        readmeText = tempDiv.textContent || tempDiv.innerText || '';
+        // Decode HTML entities and strip HTML tags (DOMParser, see decodeRssHtmlToText)
+        readmeText = decodeRssHtmlToText(readmeText);
         // Clean up extra whitespace
         readmeText = readmeText.replace(/\s+/g, ' ').trim();
 
@@ -2046,6 +2231,19 @@ export class GitHubApiService {
     return this.searchByTopic(topicKeywords[topic], platform, page, perPage);
   }
 
+  /**
+   * 单次原始仓库搜索：q 由调用方完整构造（可携带 in: 限定符），
+   * 复用 makeRequest 的鉴权、超时与限流语义。
+   */
+  async searchRepositoriesRaw(query: string, perPage = 25, signal?: AbortSignal): Promise<Repository[]> {
+    const data = await this.makeRequest<GitHubSearchRepoResponse>(
+      `/search/repositories?q=${encodeURIComponent(query)}&per_page=${perPage}`,
+      { operationTag: 'repo-search-recall' },
+      signal,
+    );
+    return Array.isArray(data.items) ? data.items : [];
+  }
+
   async searchRepositories(
     query: string,
     platform: DiscoveryPlatform,
@@ -2053,7 +2251,8 @@ export class GitHubApiService {
     sortBy: SortBy,
     sortOrder: SortOrder,
     page: number = 1,
-    perPage: number = 20
+    perPage: number = 20,
+    signal?: AbortSignal,
   ): Promise<PaginatedDiscoveryRepositories> {
     const platformQuery = this.buildPlatformQuery(platform);
     const languageQuery = this.buildLanguageQuery(language);
@@ -2072,7 +2271,7 @@ export class GitHubApiService {
       url += `&sort=${sort}&order=${order}`;
     }
 
-    const data = await this.makeRequest<GitHubSearchRepoResponse>(url);
+    const data = await this.makeRequest<GitHubSearchRepoResponse>(url, {}, signal);
 
     const repos = (data.items || []).map((repo, index) => ({
       ...repo,
@@ -2174,7 +2373,7 @@ export class GitHubApiService {
   }
 
   // Check if a fork's branch is behind its upstream — returns true if "out-of-date"
-  async checkForkSyncNeeded(owner: string, repo: string, branch: string, parentFullName?: string): Promise<{ needsSync: boolean, parentFullName?: string, parentHtmlUrl?: string }> {
+  async checkForkSyncNeeded(owner: string, repo: string, branch: string, parentFullName?: string): Promise<{ needsSync: boolean | undefined, parentFullName?: string, parentHtmlUrl?: string }> {
     try {
       let parentOwner = '';
       let resultParentFullName = parentFullName;
@@ -2202,7 +2401,8 @@ export class GitHubApiService {
       };
     } catch (error) {
       logger.warn('githubApi', `Failed to check sync status for ${owner}/${repo}`, error);
-      return { needsSync: false };
+      // undefined = 检查失败：调用方应保留「未检查」状态，避免误计入「已是最新」
+      return { needsSync: undefined };
     }
   }
 
@@ -2244,6 +2444,13 @@ export class GitHubApiService {
   }
 }
 
+/**
+ * Constructs the GitHub OAuth authorization URL with required scopes and CSRF state parameter.
+ *
+ * @param clientId - The GitHub OAuth application client ID.
+ * @param redirectUri - The callback redirect URI registered with the application.
+ * @returns The fully formatted authorization URL.
+ */
 export const createGitHubOAuthUrl = (clientId: string, redirectUri: string): string => {
   const params = new URLSearchParams({
     client_id: clientId,
@@ -2251,7 +2458,7 @@ export const createGitHubOAuthUrl = (clientId: string, redirectUri: string): str
     // `gist` scope 是读写用户 gist（含 secret/私有 gist）所必需的，
     // 否则只能列出公共 gist，且无法创建/编辑/删除 gist。
     scope: 'read:user user:email repo gist',
-    state: Math.random().toString(36).substring(7),
+    state: secureRandomString(12),
   });
 
   return `https://github.com/login/oauth/authorize?${params.toString()}`;

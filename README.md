@@ -26,7 +26,7 @@ GitHub Stars Manager automatically syncs your starred repos, uses AI to summariz
   <img src="./assets/readme/sections/see-it.svg" width="100%" alt="See it — product screenshots of Stars, search, releases, and repository Q&amp;A.">
 </p>
 
-<https://github.com/user-attachments/assets/2f7e44c9-7a7e-40dc-9601-269b27c1ec6e>
+https://github.com/user-attachments/assets/ad3493a0-948a-4de5-8de1-4e9afc46ec4d
 
 <table>
   <tr>
@@ -392,6 +392,7 @@ npm run dev
 | `ENCRYPTION_KEY` | No | AES-256 key for encrypting stored secrets. Auto-generated if unset. |
 | `PORT` | No | Server port (default: 3000) |
 | `CSP_CONNECT_SRC` | No | Comma-separated extra origins appended to the `connect-src` CSP directive, for custom AI provider / vector-search worker endpoints called directly from the browser (e.g. `https://ai.example.com,https://worker.example.org`). |
+| `CSP_UPGRADE_INSECURE_REQUESTS` | No | Defaults to on, which sends `upgrade-insecure-requests`. Set to `false` when the full-stack image is served over plain HTTP (e.g. `http://<lan-ip>:3000`); otherwise the browser rewrites the SPA's own assets to `https://` and the page stays blank. Only disable it for HTTP deployments you do not intend to put behind TLS. |
 
 #### Connecting Frontend to Backend
 1. Open Settings panel in the app

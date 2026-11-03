@@ -35,6 +35,13 @@ const FONT_SIZES = [
 
 const TOC_MAX_LEVEL = 6;
 
+const shouldOpenTocByDefault = (): boolean => {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return true;
+  }
+  return !window.matchMedia('(max-width: 767px)').matches;
+};
+
 const getDefaultReadmeVariant = (language: AppLanguage): ReadmeVariant => ({
   ...DEFAULT_README_VARIANT,
   label: i18n.getFixedT(language, 'app')('readmeModal.default-readme'),
@@ -57,7 +64,7 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
   const [readmeContent, setReadmeContent] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showToc, setShowToc] = useState(true);
+  const [showToc, setShowToc] = useState(shouldOpenTocByDefault);
   const [fontSizeIndex, setFontSizeIndex] = useState(1);
   const [tocItems, setTocItems] = useState<TocItem[]>([]);
   const [headingIdMap, setHeadingIdMap] = useState<Map<string, string>>(new Map());
@@ -193,13 +200,39 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
     }
   }, []);
 
+  const scrollRafRef = useRef<number | null>(null);
+  const scrollFrameUsesRafRef = useRef(false);
+
+  // 进度条读取 scrollHeight/clientHeight 会强制布局，用 rAF 合帧避免滚动时反复重排。
   const handleScroll = useCallback(() => {
-    if (!contentRef.current) return;
-    const container = contentRef.current;
-    const { scrollTop, scrollHeight, clientHeight } = container;
-    const progress = scrollHeight <= clientHeight ? 0 : (scrollTop / (scrollHeight - clientHeight)) * 100;
-    setScrollProgress(Math.min(100, Math.max(0, progress)));
-    setShowBackToTop(scrollTop > 300);
+    if (scrollRafRef.current !== null) return;
+    const run = () => {
+      scrollRafRef.current = null;
+      if (!contentRef.current) return;
+      const container = contentRef.current;
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const progress = scrollHeight <= clientHeight ? 0 : (scrollTop / (scrollHeight - clientHeight)) * 100;
+      setScrollProgress(Math.min(100, Math.max(0, progress)));
+      setShowBackToTop(scrollTop > 300);
+    };
+    // 记录本次调度用的 API：取消时按同一 API 取消，避免环境变化后错配 id 类型。
+    if (typeof window.requestAnimationFrame === 'function') {
+      scrollFrameUsesRafRef.current = true;
+      scrollRafRef.current = window.requestAnimationFrame(run);
+    } else {
+      scrollFrameUsesRafRef.current = false;
+      scrollRafRef.current = window.setTimeout(run, 16) as unknown as number;
+    }
+  }, []);
+
+  useEffect(() => () => {
+    if (scrollRafRef.current === null) return;
+    if (scrollFrameUsesRafRef.current) {
+      window.cancelAnimationFrame(scrollRafRef.current);
+    } else {
+      window.clearTimeout(scrollRafRef.current);
+    }
+    scrollRafRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -468,7 +501,7 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     } else {
-      setShowToc(true);
+      setShowToc(shouldOpenTocByDefault());
     }
   }, [isOpen, language, cancelFetches]);
 
@@ -501,15 +534,16 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         showClose={false}
+        fullscreen
         aria-describedby={undefined}
-        className="w-[calc(100%_-_2rem)] max-w-[1130px] min-w-0 overflow-hidden p-0"
+        className="flex min-w-0 flex-col overflow-hidden p-0"
         onCloseAutoFocus={(event) => {
           if (!onCloseAutoFocus) return;
           event.preventDefault();
           onCloseAutoFocus();
         }}
       >
-        <div className="relative flex max-h-[90vh] min-w-0 max-w-full w-full flex-col overflow-hidden bg-card dark:bg-card">
+        <div className="relative flex min-h-0 min-w-0 max-w-full w-full flex-1 flex-col overflow-hidden bg-card dark:bg-card">
           {readmeContent && !loading && (
             <div className="absolute top-0 left-0 right-0 h-0.5 bg-accent dark:bg-muted z-20 rounded-t-xl overflow-hidden">
               <div
@@ -681,11 +715,11 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
             </div>
           </div>
 
-          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div className="app-readme-body flex min-h-0 min-w-0 flex-1 overflow-hidden">
             {showToc && tocItems.length > 0 && (
               <>
                 <div
-                  className="border-r border-border dark:border-border overflow-y-auto p-4 flex-shrink-0 readme-scrollbar"
+                  className="app-readme-toc border-r border-border dark:border-border overflow-y-auto p-4 flex-shrink-0 readme-scrollbar"
                   style={{ width: tocWidth }}
                 >
                   <h4 className="text-sm font-semibold text-foreground dark:text-foreground mb-3">
@@ -698,7 +732,12 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
                         <Button
                           key={item.id}
                           variant="ghost"
-                          onClick={() => scrollToHeading(item.id, item.text)}
+                          onClick={() => {
+                            scrollToHeading(item.id, item.text);
+                            if (window.matchMedia?.('(max-width: 767px)').matches) {
+                              setShowToc(false);
+                            }
+                          }}
                           className={`h-auto block w-full text-left text-sm py-1 px-2 rounded transition-colors truncate ${tocIndentClass(item.level)} ${tocTextClass(item.level)} ${
                             activeHeadingId === item.id
                               ? 'bg-primary/10 text-primary dark:bg-primary/10 dark:text-primary font-medium'
@@ -714,7 +753,7 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
                 </div>
                 <div
                   onMouseDown={handleResizeMouseDown}
-                  className="w-1.5 cursor-col-resize bg-transparent hover:bg-ring dark:hover:bg-ring transition-colors flex-shrink-0 relative group"
+                  className="app-readme-resize-handle w-1.5 cursor-col-resize bg-transparent hover:bg-ring dark:hover:bg-ring transition-colors flex-shrink-0 relative group"
                 >
                   <div className="absolute inset-y-0 -left-1 -right-1" />
                 </div>
@@ -723,7 +762,7 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({
 
             <div
               ref={contentRef}
-              className={`min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto p-6 ${currentFontSize} select-text readme-scrollbar relative`}
+              className={`app-readme-content min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto p-6 ${currentFontSize} select-text readme-scrollbar relative`}
               onScroll={handleScroll}
             >
             {loading ? (

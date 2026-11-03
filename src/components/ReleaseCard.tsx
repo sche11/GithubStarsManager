@@ -15,7 +15,9 @@ import {
   shouldShowAssetsUpdatedIndicator,
 } from '../utils/releaseAssets';
 import { Button } from './ui/button';
+import { Badge } from './ui/badge';
 import { ReleasePluginRecommendations } from './ReleasePluginRecommendations';
+import type { InstallablePlatform } from '../types/installableAsset';
 
 interface DownloadLink {
   name: string;
@@ -49,6 +51,9 @@ interface ReleaseCardProps {
   downloadLinks: DownloadLink[];
   /** 该 Release 的全部下载链接（未裁剪）；省略时视为与 downloadLinks 相同 */
   allDownloadLinks?: DownloadLink[];
+  /** Keyed by URL because card-local link order can differ from the filter input order. */
+  assetBadges?: Map<string, 'recommended' | 'emulated' | 'unverified'>;
+  currentPlatform?: InstallablePlatform;
   isUnread: boolean;
   isAssetsExpanded: boolean;
   isReleaseNotesExpanded: boolean;
@@ -64,10 +69,52 @@ interface ReleaseCardProps {
   formatFileSize: (bytes: number) => string;
 }
 
+const AssetCompatibilityBadge: React.FC<{
+  kind: 'recommended' | 'emulated' | 'unverified';
+  platform?: InstallablePlatform;
+}> = ({ kind, platform }) => {
+  const t = useT('releases');
+  if (kind === 'recommended') {
+    return (
+      <Badge
+        variant="secondary"
+        className="h-5 shrink-0 border-success/30 bg-success/10 px-1.5 text-[10px] font-medium text-success"
+        title={t('releaseCard.asset-recommended-tip')}
+      >
+        {t('releaseCard.asset-recommended')}
+      </Badge>
+    );
+  }
+  if (kind === 'emulated') {
+    return (
+      <Badge
+        variant="outline"
+        className="h-5 shrink-0 border-amber-500/40 bg-amber-500/10 px-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-400"
+        title={platform === 'macos'
+          ? t('releaseCard.asset-emulated-tip-macos')
+          : t('releaseCard.asset-emulated-tip-windows')}
+      >
+        {t('releaseCard.asset-emulated')}
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="h-5 shrink-0 px-1.5 text-[10px] font-normal text-muted-foreground"
+      title={t('releaseCard.asset-unverified-tip')}
+    >
+      {t('releaseCard.asset-unverified')}
+    </Badge>
+  );
+};
+
 const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
   release,
   downloadLinks,
   allDownloadLinks,
+  assetBadges,
+  currentPlatform,
   isUnread,
   isAssetsExpanded,
   isReleaseNotesExpanded,
@@ -160,9 +207,9 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
       <div className="p-3 sm:p-4">
         <div className="flex items-stretch justify-between gap-3">
           <div className="flex items-center min-w-0 flex-1">
-            {isUnread && (
-              <div className="w-1.5 h-1.5 bg-primary rounded-full flex-shrink-0 animate-pulse mr-2"></div>
-            )}
+            <span className="app-unread-marker-slot" aria-hidden="true">
+              {isUnread && <span className="app-unread-marker" />}
+            </span>
             <div className="linear-platform-icon flex items-center justify-center w-8 h-8 flex-shrink-0">
               <GitBranch className="w-4 h-4 text-muted-foreground dark:text-muted-foreground" />
             </div>
@@ -213,7 +260,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
               )}
             </div>
             {/* 固定宽度需容纳英文五控件（Assets/Notes/Summary+2图标，约340px），否则换行按钮会溢出头部 */}
-            <div className="flex items-center justify-end gap-1 flex-shrink-0 md:w-[344px] md:min-w-[344px]">
+            <div className="app-row-actions flex items-center justify-end flex-shrink-0 md:w-[344px] md:min-w-[344px]">
             {downloadLinks.length > 0 && (
               <Button
                 onClick={(e) => {
@@ -221,7 +268,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                   onToggleAssets();
                 }}
                 variant={isAssetsExpanded ? 'secondary' : 'ghost'}
-                className="h-8 gap-1 px-2 text-xs whitespace-nowrap"
+                className="app-row-action app-row-action--label whitespace-nowrap"
                 title={isAssetsExpanded ? t('releaseCard.hide-assets') : t('releaseCard.show-assets')}
                 aria-label={isAssetsExpanded ? t('releaseCard.hide-assets') : t('releaseCard.show-assets')}
                 aria-expanded={isAssetsExpanded}
@@ -239,7 +286,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                   onToggleReleaseNotes();
                 }}
                 variant={isReleaseNotesExpanded ? 'secondary' : 'ghost'}
-                className="h-8 gap-1 px-2 text-xs whitespace-nowrap"
+                className="app-row-action app-row-action--label whitespace-nowrap"
                 title={isReleaseNotesExpanded ? t('releaseCard.hide-changelog') : t('releaseCard.show-changelog')}
                 aria-label={isReleaseNotesExpanded ? t('releaseCard.hide-changelog') : t('releaseCard.show-changelog')}
                 aria-expanded={isReleaseNotesExpanded}
@@ -255,7 +302,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                 onClick={handleToggleSummary}
                 disabled={summary.status === 'loading'}
                 variant={isSummaryExpanded ? 'secondary' : 'ghost'}
-                className="h-8 gap-1 px-2 text-xs whitespace-nowrap disabled:opacity-70"
+                className="app-row-action app-row-action--label whitespace-nowrap disabled:opacity-70"
                 title={isSummaryExpanded ? t('releaseCard.hide-ai-summary') : (summary.status === 'error' ? t('releaseCard.retry-ai-summary') : t('releaseCard.ai-summary-of-this-update'))}
                 aria-label={isSummaryExpanded ? t('releaseCard.hide-ai-summary') : (summary.status === 'error' ? t('releaseCard.retry-ai-summary') : t('releaseCard.ai-summary-of-this-update'))}
                 aria-expanded={isSummaryExpanded}
@@ -275,7 +322,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                 e.stopPropagation();
                 onUnsubscribe();
               }}
-              className="h-auto p-1 rounded bg-muted text-muted-foreground dark:bg-muted/40 dark:text-muted-foreground hover:bg-accent hover:text-foreground dark:hover:bg-accent dark:hover:text-foreground transition-colors"
+              className="app-row-action"
               title={t('releaseCard.unsubscribe-from-releases')}
               aria-label={t('releaseCard.unsubscribe-from-releases')}
             >
@@ -285,7 +332,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
               href={release.html_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="h-auto p-1 rounded bg-muted text-muted-foreground dark:bg-muted/40 dark:text-muted-foreground hover:bg-accent hover:text-foreground dark:hover:bg-accent dark:hover:text-foreground transition-colors"
+              className="app-row-action"
               title={t('releaseCard.view-on-github')}
               aria-label={t('releaseCard.view-on-github')}
               onClick={(e) => {
@@ -373,6 +420,12 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                           <span className={`text-sm truncate ${link.isSourceCode ? 'text-muted-foreground dark:text-muted-foreground font-medium' : 'text-foreground dark:text-muted-foreground'}`}>
                             {link.name}
                           </span>
+                          {assetBadges?.get(link.url) && (
+                            <AssetCompatibilityBadge
+                              kind={assetBadges.get(link.url)!}
+                              platform={currentPlatform}
+                            />
+                          )}
                         </div>
                         <div className="flex items-center space-x-2 text-xs text-muted-foreground dark:text-muted-foreground flex-shrink-0">
                           {isAssetUpdated && (
@@ -415,6 +468,12 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                         <span className={`text-sm truncate ${link.isSourceCode ? 'text-muted-foreground dark:text-muted-foreground font-medium' : 'text-foreground dark:text-muted-foreground'}`}>
                           {link.name}
                         </span>
+                        {assetBadges?.get(link.url) && (
+                          <AssetCompatibilityBadge
+                            kind={assetBadges.get(link.url)!}
+                            platform={currentPlatform}
+                          />
+                        )}
                       </div>
                       <div className="flex items-center space-x-2 text-xs text-muted-foreground dark:text-muted-foreground flex-shrink-0">
                         {isAssetUpdated && (
@@ -451,6 +510,7 @@ const ReleaseCard: React.FC<ReleaseCardProps> = memo(({
                   content={isFullContent ? (release.body || '') : truncatedBody}
                   shouldRender={true}
                   fontSize="small"
+                  baseUrl={`https://github.com/${release.repository.full_name}`}
                 />
 
                 {(release.body || '').length > truncatedBody.length && (

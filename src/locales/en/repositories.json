@@ -1,5 +1,6 @@
 {
   "batchStar": {
+    "token-permission-error": "GitHub rejected this token (403). To check or add Stars, enable Starring read/write and repository Metadata read on a fine-grained token, or public_repo on a classic token (repo for private repositories).",
     "title": "Star from links",
     "hint": "Paste any text containing GitHub links, review the repositories, then Star them. Links to other websites are ignored.",
     "history": "Paste history",
@@ -304,7 +305,7 @@
     "no": "No",
     "v1-year": "{{v1}} / year",
     "v1-days-years-years": "{{v1}} days (~{{years}} years)",
-    "repository-health-facts": "Repository health facts",
+    "repository-health-facts": "Repository overview",
     "these-are-objective-facts-with-no-overall-score": "These are objective facts with no overall score. “Unknown” means the fact has not been obtained yet."
   }
 }

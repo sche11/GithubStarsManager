@@ -2,8 +2,11 @@
 import type { LogEntry, LogLevel } from '../../../services/logger';
 import { backend } from '../../../services/backendAdapter';
 
+/** Panel log scopes: 'main'/'plugins' come from the desktop diagnostics journal. */
+export type DiagnosticScope = 'all' | 'frontend' | 'backend' | 'main' | 'plugins';
+
 interface UseDiagnosticBackendActionsOptions {
-  selectedScope: 'all' | 'frontend' | 'backend';
+  selectedScope: DiagnosticScope;
 }
 
 interface BackendLogsResponse {
@@ -68,7 +71,7 @@ export const useDiagnosticBackendActions = ({ selectedScope }: UseDiagnosticBack
   }, [backendAvailable, fetchLogs]);
 
   useEffect(() => {
-    if (selectedScope === 'frontend') {
+    if (selectedScope === 'frontend' || selectedScope === 'main' || selectedScope === 'plugins') {
       setBackendEntries([]);
       setBackendLogCount(0);
       return;

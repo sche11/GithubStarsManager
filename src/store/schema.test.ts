@@ -48,4 +48,16 @@ describe('normalizeRepositoryChatSettings', () => {
     expect(normalizeRepositoryChatSettings({ taskDepth: 'bogus' }).taskDepth).toBe('default');
     expect(normalizeRepositoryChatSettings({ taskDepth: 42 }).taskDepth).toBe('default');
   });
+
+  it('keeps the README fast path enabled by default and honors explicit opt-outs', () => {
+    expect(normalizeRepositoryChatSettings({}).fastPath).toBe(true);
+    expect(normalizeRepositoryChatSettings({ fastPath: true }).fastPath).toBe(true);
+    expect(normalizeRepositoryChatSettings({ fastPath: false }).fastPath).toBe(false);
+  });
+
+  it('normalizes the thread layout preference', () => {
+    expect(normalizeRepositoryChatSettings({}).layout).toBe('sheet');
+    expect(normalizeRepositoryChatSettings({ layout: 'fullscreen' }).layout).toBe('fullscreen');
+    expect(normalizeRepositoryChatSettings({ layout: 'invalid' }).layout).toBe('sheet');
+  });
 });

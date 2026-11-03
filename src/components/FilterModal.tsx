@@ -160,7 +160,7 @@ const RepoPickerPanel: React.FC<{
         placeholder={searchPlaceholder}
         aria-label={searchPlaceholder}
         autoFocus
-        className="w-full pl-8 pr-3 py-2 border border-border dark:border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent bg-card dark:bg-muted/40 text-foreground dark:text-foreground"
+        className="w-full pl-8 pr-3 py-2 border border-border dark:border-border rounded-lg focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent bg-card dark:bg-muted/40 text-foreground dark:text-foreground"
       />
     </div>
 
@@ -337,7 +337,7 @@ export const FilterModal: React.FC<FilterModalProps> = ({
     // 四个数组始终写回（允许空数组）：updateAssetFilter 是 spread 合并，
     // 省略键会导致清空后的黑名单/始终包含/始终排除仓库残留旧值。
     const savedFilter: AssetFilter = {
-      id: filter?.id || Date.now().toString(),
+      id: filter?.id || `custom-${Date.now()}`,
       name: name.trim(),
       keywords: keywords.filter(k => k.trim()),
       excludeKeywords: excludeKeywords.filter(k => k.trim()),
@@ -349,7 +349,7 @@ export const FilterModal: React.FC<FilterModalProps> = ({
     onClose();
   };
 
-  const keywordInputClass = 'flex-1 px-3 py-2 border border-border dark:border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent bg-card dark:bg-muted/40 text-foreground dark:text-foreground';
+  const keywordInputClass = 'flex-1 px-3 py-2 border border-border dark:border-border rounded-lg focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent bg-card dark:bg-muted/40 text-foreground dark:text-foreground';
 
   const assetRuleCount = keywords.length + excludeKeywords.length;
   const repoRuleCount = includeRepos.length + alwaysExcludeRepos.length;
@@ -476,7 +476,7 @@ export const FilterModal: React.FC<FilterModalProps> = ({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={tModal('name-placeholder')}
-            className="w-full px-3 py-2 border border-border dark:border-border rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent bg-card dark:bg-muted/40 text-foreground dark:text-foreground"
+            className="w-full px-3 py-2 border border-border dark:border-border rounded-lg focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent bg-card dark:bg-muted/40 text-foreground dark:text-foreground"
           />
         </div>
 

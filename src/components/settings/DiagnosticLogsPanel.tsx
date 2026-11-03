@@ -5,7 +5,7 @@ import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Switch } from '../ui/switch';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '../ui/dropdown-menu';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   ScrollText,
@@ -20,13 +20,16 @@ import {
   ChevronRight,
   Check,
   X,
+  Package,
+  Globe,
 } from 'lucide-react';
 import { logger, LogLevel, LogEntry } from '../../services/logger';
 import { maskUrlDomain } from '../../utils/logSanitizer';
 import { inferEventType, EVENT_TYPE_LABELS, LogEventType } from '../../utils/logEventTypes';
+import { getNetworkEntries } from '../../services/fetchCapture';
 import { version as appVersion } from '../../../package.json';
 import { useAppStore } from '../../store/useAppStore';
-import { useDiagnosticBackendActions } from '../../features/settings/hooks/useDiagnosticBackendActions';
+import { useDiagnosticBackendActions, DiagnosticScope } from '../../features/settings/hooks/useDiagnosticBackendActions';
 
 interface DiagnosticLogsPanelProps {
   t: TranslateFn;
@@ -71,6 +74,26 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diff / 86400000)}d`;
 }
 
+/** Short source badge label (main/plugins come from the desktop journal). */
+function sourceBadgeLabel(source: string, t: TranslateFn): string {
+  switch (source) {
+    case 'frontend': return t('diagnosticLogsPanel.fe');
+    case 'backend': return t('diagnosticLogsPanel.be');
+    case 'main': return t('diagnosticLogsPanel.source-main');
+    default: return t('diagnosticLogsPanel.source-plugins');
+  }
+}
+
+/** Full source label used in the detail modal. */
+function sourceFullLabel(source: string, t: TranslateFn): string {
+  switch (source) {
+    case 'frontend': return t('diagnosticLogsPanel.frontend');
+    case 'backend': return t('diagnosticLogsPanel.backend');
+    case 'main': return t('diagnosticLogsPanel.source-main');
+    default: return t('diagnosticLogsPanel.source-plugins');
+  }
+}
+
 function getStatusColor(status: unknown): string {
   if (!status) return '';
   const s = String(status);
@@ -101,9 +124,7 @@ const LogDetailModal: React.FC<LogDetailModalProps> = ({ entry, language, t, onC
               <Badge variant={LEVEL_BADGE_VARIANTS[entry.level]}>{entry.level}</Badge>
             </Row>
             <Row label={t('diagnosticLogsPanel.source')}>
-              <Badge variant="secondary">
-                {entry.source === 'frontend' ? t('diagnosticLogsPanel.frontend') : t('diagnosticLogsPanel.backend')}
-              </Badge>
+              <Badge variant="secondary">{sourceFullLabel(entry.source, t)}</Badge>
             </Row>
             <Row label={t('diagnosticLogsPanel.event-type')}>
               <span className="text-sm">{language === 'zh' ? EVENT_TYPE_LABELS[eventType].zh : EVENT_TYPE_LABELS[eventType].en}</span>
@@ -185,24 +206,25 @@ const LogDetailModal: React.FC<LogDetailModalProps> = ({ entry, language, t, onC
       <DialogContent
         aria-describedby={undefined}
         showClose={false}
-        className="grid-rows-[auto_auto_minmax(0,1fr)] max-w-3xl max-h-[80vh] overflow-hidden p-0"
+        className="app-diagnostic-detail-dialog grid-rows-[auto_auto_minmax(0,1fr)] max-w-3xl max-h-[80vh] overflow-hidden p-0 pr-12"
       >
         {/* Header */}
-        <DialogHeader className="flex-row items-center justify-between space-y-0 border-b border-border px-5 py-4">
+        <DialogHeader className="app-diagnostic-dialog-header items-center justify-between space-y-0 border-b border-border px-5 py-4">
           <div className="flex min-w-0 items-center space-x-3">
             <Badge variant={LEVEL_BADGE_VARIANTS[entry.level]} className="shrink-0">{entry.level}</Badge>
             <DialogTitle className="truncate text-sm font-medium leading-normal tracking-normal">{entry.message}</DialogTitle>
           </div>
+        </DialogHeader>
+        <DialogClose asChild>
           <Button
             variant="ghost"
             size="icon"
-            onClick={onClose}
             aria-label={t('diagnosticLogsPanel.close-log-details')}
-            className="ml-2 h-8 w-8 shrink-0"
+            className="app-dialog-close"
           >
             <X className="h-5 w-5 text-muted-foreground dark:text-muted-foreground" />
           </Button>
-        </DialogHeader>
+        </DialogClose>
 
         {/* Tabs */}
         <div className="flex min-w-0 overflow-x-auto border-b border-border px-5">
@@ -276,7 +298,15 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
   // Filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedLevels, setSelectedLevels] = useState<Set<LogLevel>>(new Set(['info', 'warn', 'error']));
-  const [selectedScope, setSelectedScope] = useState<'all' | 'frontend' | 'backend'>('all');
+  const [selectedScope, setSelectedScope] = useState<DiagnosticScope>('all');
+  // Desktop journal scopes (main/plugins) — populated via diagnostics:read.
+  const isDesktopJournal = typeof window !== 'undefined' && !!window.electronAPI?.diagnostics;
+  const [mainEntries, setMainEntries] = useState<LogEntry[]>([]);
+  const [pluginEntries, setPluginEntries] = useState<LogEntry[]>([]);
+  const [exportWindow, setExportWindow] = useState<1 | 24 | null>(24);
+  const [isExportingBundle, setIsExportingBundle] = useState(false);
+  const [showNetworkLedger, setShowNetworkLedger] = useState(false);
+  const [networkEntries, setNetworkEntries] = useState<LogEntry[]>(() => getNetworkEntries());
   const {
     backendAvailable, backendUrl, backendDebug, backendEntries, backendLogCount,
     clear: clearBackend, refresh: refreshBackend, toggleDebug: toggleBackendDebug, fetchLogs: fetchBackendLogs,
@@ -305,12 +335,40 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
   }, []);
 
 
+  // Desktop journal polling (main-process + plugin entries), 10s cadence.
+  useEffect(() => {
+    if (!isDesktopJournal) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const result = await window.electronAPI?.diagnostics?.read({ limit: 2000 });
+        if (!active || !result?.success) return;
+        setMainEntries(result.main ?? []);
+        setPluginEntries(result.plugins ?? []);
+      } catch { /* diagnostics read is best-effort */ }
+    };
+    void load();
+    const interval = setInterval(() => { void load(); }, 10_000);
+    return () => { active = false; clearInterval(interval); };
+  }, [isDesktopJournal]);
+
+  // Network ledger refresh while visible in debug mode.
+  useEffect(() => {
+    if (!frontendDebug || !showNetworkLedger) return;
+    setNetworkEntries(getNetworkEntries());
+    const interval = setInterval(() => setNetworkEntries(getNetworkEntries()), 2000);
+    return () => clearInterval(interval);
+  }, [frontendDebug, showNetworkLedger]);
+
   // Merge entries — sorted by timestamp DESCENDING (newest first)
+  const sortNewestFirst = (list: LogEntry[]) => [...list].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const allEntries = useMemo(() => {
-    if (selectedScope === 'frontend') return [...entries].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-    if (selectedScope === 'backend') return [...backendEntries].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-    return [...entries, ...backendEntries].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  }, [entries, backendEntries, selectedScope]);
+    if (selectedScope === 'frontend') return sortNewestFirst(entries);
+    if (selectedScope === 'backend') return sortNewestFirst(backendEntries);
+    if (selectedScope === 'main') return sortNewestFirst(mainEntries);
+    if (selectedScope === 'plugins') return sortNewestFirst(pluginEntries);
+    return sortNewestFirst([...entries, ...backendEntries, ...mainEntries, ...pluginEntries]);
+  }, [entries, backendEntries, mainEntries, pluginEntries, selectedScope]);
 
   // Derived: available event types
   const availableEventTypes = useMemo(() => {
@@ -418,6 +476,49 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
     } catch { /* Export failed */ } finally { setIsExporting(false); }
   }, [selectedScope, selectedLevels, backendAvailable, backendDebug, backendUrl, fetchBackendLogs, frontendDebug, t]);
 
+  // Diagnostics bundle (desktop): the main process merges its journal tail,
+  // plugin log tails, and an environment snapshot with what we send here.
+  const handleExportBundle = useCallback(async () => {
+    const exportApi = window.electronAPI?.diagnostics?.exportBundle;
+    if (!exportApi) return;
+    setIsExportingBundle(true);
+    try {
+      const levelOrder: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+      const minLevel = selectedLevels.size > 0
+        ? (Object.entries(levelOrder).find(([l]) => selectedLevels.has(l as LogLevel))?.[1] ?? 3)
+        : 3;
+      const minLevelName = (Object.entries(levelOrder).find(([, v]) => v === minLevel)?.[0] as LogLevel) || 'info';
+      const frontendLogs = selectedScope !== 'backend'
+        ? logger.getEntries({ level: minLevelName }).filter(e => selectedLevels.has(e.level)) : [];
+      let backendLogs: LogEntry[] = [];
+      if (selectedScope !== 'frontend' && backendAvailable) {
+        backendLogs = ((await fetchBackendLogs(minLevelName))?.logs ?? []).filter((entry) => selectedLevels.has(entry.level));
+      }
+      const networkEntries = getNetworkEntries().filter((entry) => selectedLevels.has(entry.level));
+      const state = useAppStore.getState();
+      const environment = {
+        platform: 'electron',
+        osPlatform: navigator.platform,
+        screenResolution: `${screen.width}x${screen.height}`,
+        backendAvailable,
+        backendUrl: backendAvailable ? maskUrlDomain(backendUrl) : null,
+        language: state.language,
+        repoCount: state.repositories?.length ?? 0,
+        frontendDebugMode: frontendDebug,
+        backendDebugMode: backendDebug,
+        appVersion,
+      };
+      await exportApi({
+        windowHours: exportWindow,
+        frontendLogs,
+        backendLogs,
+        networkEntries,
+        environment,
+        sanitizationNote: t('diagnosticLogsPanel.all-tokens-api-keys-passwords-and-emails-have-be'),
+      });
+    } catch { /* Bundle export failed */ } finally { setIsExportingBundle(false); }
+  }, [selectedScope, selectedLevels, backendAvailable, backendDebug, backendUrl, fetchBackendLogs, frontendDebug, exportWindow, t]);
+
   const toggleLevel = useCallback((level: LogLevel) => {
     setSelectedLevels(prev => { const next = new Set(prev); if (next.has(level)) next.delete(level); else next.add(level); return next; });
   }, []);
@@ -433,15 +534,15 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
       {/* Detail modal */}
       {detailEntry && <LogDetailModal entry={detailEntry} language={language} t={t} onClose={() => setDetailEntry(null)} />}
 
-      <div className="space-y-4">
+      <div className="app-diagnostic-panel space-y-4">
         {/* Debug Mode Section */}
-        <section>
-          <h3 className="text-lg font-semibold text-foreground dark:text-foreground mb-4 flex items-center">
+        <section className="app-diagnostic-section">
+          <h3 className="app-diagnostic-section-title text-lg font-semibold text-foreground dark:text-foreground mb-4 flex items-center">
             <ScrollText className="w-5 h-5 mr-2 text-muted-foreground dark:text-muted-foreground" />
             {t('diagnosticLogsPanel.debug-mode')}
           </h3>
-          <div className="bg-card dark:bg-card rounded-lg border border-border dark:border-border p-4 space-y-4">
-            <div className="flex items-center justify-between">
+          <div className="app-diagnostic-card bg-card dark:bg-card rounded-lg border border-border dark:border-border p-4 space-y-4">
+            <div className="app-diagnostic-row flex items-center justify-between">
               <div className="flex-1">
                 <div className="flex items-center space-x-2">
                   <span className="font-medium text-foreground dark:text-foreground">{t('diagnosticLogsPanel.frontend-debug')}</span>
@@ -459,7 +560,7 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
                 aria-label={t('diagnosticLogsPanel.toggle-frontend-debug')}
               />
             </div>
-            <div className="flex items-center justify-between">
+            <div className="app-diagnostic-row flex items-center justify-between">
               <div className="flex-1">
                 <div className="flex items-center space-x-2">
                   <span className={`font-medium ${backendAvailable ? 'text-foreground dark:text-foreground' : 'text-muted-foreground dark:text-muted-foreground/70'}`}>{t('diagnosticLogsPanel.backend-debug')}</span>
@@ -496,7 +597,7 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
             <Input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               aria-label={t('diagnosticLogsPanel.search-log-modules-or-messages')}
               placeholder={t('diagnosticLogsPanel.search-module-or-message')}
-              className="w-full pl-10 pr-4 py-2 rounded-lg border border-border dark:border-border bg-muted dark:bg-muted/40 text-foreground dark:text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+              className="w-full pl-10 pr-4 py-2 rounded-lg border border-border dark:border-border bg-muted dark:bg-muted/40 text-foreground dark:text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-(--ui-focus-ring)" />
           </div>
 
           {/* Level pills — debug pill always clickable */}
@@ -521,13 +622,18 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
           {/* Scope + Event type + Actions */}
           <div className="flex items-center space-x-3 flex-wrap gap-y-2">
             <div className="flex items-center rounded-lg border border-border dark:border-border overflow-hidden">
-              {(['all', 'frontend', 'backend'] as const).map(scope => (
-                <Button key={scope} onClick={() => setSelectedScope(scope)} disabled={scope === 'backend' && !backendAvailable}
+              {(['all', 'frontend', 'main', 'plugins', 'backend'] as const).map(scope => (
+                <Button key={scope} onClick={() => setSelectedScope(scope)}
+                  disabled={(scope === 'backend' && !backendAvailable) || ((scope === 'main' || scope === 'plugins') && !isDesktopJournal)}
                   aria-pressed={selectedScope === scope}
                   variant={selectedScope === scope ? 'default' : 'outline'}
                   size="sm"
-                  className={`h-8 rounded-none border-0 px-3 text-sm first:rounded-l-md last:rounded-r-md ${scope === 'backend' && !backendAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
-                  {scope === 'all' ? t('diagnosticLogsPanel.all') : scope === 'frontend' ? t('diagnosticLogsPanel.frontend') : t('diagnosticLogsPanel.backend')}
+                  className={`h-8 rounded-none border-0 px-3 text-sm first:rounded-l-md last:rounded-r-md ${((scope === 'backend' && !backendAvailable) || ((scope === 'main' || scope === 'plugins') && !isDesktopJournal)) ? 'opacity-40 cursor-not-allowed' : ''}`}>
+                  {scope === 'all' ? t('diagnosticLogsPanel.all')
+                    : scope === 'frontend' ? t('diagnosticLogsPanel.frontend')
+                    : scope === 'backend' ? t('diagnosticLogsPanel.backend')
+                    : scope === 'main' ? t('diagnosticLogsPanel.source-main')
+                    : t('diagnosticLogsPanel.source-plugins')}
                 </Button>
               ))}
             </div>
@@ -561,6 +667,28 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
               <Button variant="secondary" onClick={handleClear} className="h-9 gap-1 px-3 text-sm font-medium">
                 <Trash2 className="w-4 h-4" /><span>{t('diagnosticLogsPanel.clear')}</span>
               </Button>
+              {isDesktopJournal && (
+                <div className="flex items-center rounded-lg border border-border dark:border-border overflow-hidden" role="group" aria-label={t('diagnosticLogsPanel.export-bundle')}>
+                  {([1, 24, null] as const).map(windowOption => (
+                    <Button key={String(windowOption)} onClick={() => setExportWindow(windowOption)}
+                      aria-pressed={exportWindow === windowOption}
+                      variant={exportWindow === windowOption ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-9 rounded-none border-0 px-2 text-xs first:rounded-l-md last:rounded-r-md">
+                      {windowOption === 1 ? t('diagnosticLogsPanel.export-window-hour')
+                        : windowOption === 24 ? t('diagnosticLogsPanel.export-window-day')
+                        : t('diagnosticLogsPanel.export-window-all')}
+                    </Button>
+                  ))}
+                </div>
+              )}
+              {isDesktopJournal && (
+                <Button variant="secondary" onClick={handleExportBundle} disabled={isExportingBundle}
+                  className="h-9 gap-1 px-3 text-sm font-medium" title={t('diagnosticLogsPanel.export-bundle')}>
+                  {isExportingBundle ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
+                  <span>{isExportingBundle ? t('diagnosticLogsPanel.exporting') : t('diagnosticLogsPanel.export-bundle')}</span>
+                </Button>
+              )}
               <Button onClick={handleExport} disabled={isExporting}
                 className="h-9 gap-1 px-3 text-sm font-medium">
                 {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
@@ -574,8 +702,52 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
             {(frontendDebug || backendDebug) && <Badge variant="secondary" className="ml-2">{t('diagnosticLogsPanel.debug-mode-on')}</Badge>}
             {selectedScope !== 'backend' && <span className="ml-1">· {t('diagnosticLogsPanel.frontend-v1', { v1: frontendCounts.total })}</span>}
             {selectedScope !== 'frontend' && backendAvailable && <span className="ml-1">· {t('diagnosticLogsPanel.backend-backendlogcount', { backendLogCount: backendLogCount })}</span>}
+            {(selectedScope === 'main' || selectedScope === 'all') && isDesktopJournal && <span className="ml-1">· {t('diagnosticLogsPanel.source-main')} {mainEntries.length}</span>}
+            {(selectedScope === 'plugins' || selectedScope === 'all') && isDesktopJournal && <span className="ml-1">· {t('diagnosticLogsPanel.source-plugins')} {pluginEntries.length}</span>}
           </div>
         </section>
+
+        {/* Network ledger (debug mode only) */}
+        {frontendDebug && (
+          <section className="bg-card dark:bg-card rounded-lg border border-border dark:border-border p-4">
+            <button
+              type="button"
+              onClick={() => setShowNetworkLedger(prev => !prev)}
+              aria-expanded={showNetworkLedger}
+              className="flex items-center space-x-2 text-sm font-medium text-foreground dark:text-foreground"
+            >
+              <Globe className="w-4 h-4 text-muted-foreground dark:text-muted-foreground" />
+              <span>{t('diagnosticLogsPanel.network-ledger')}</span>
+              <Badge variant="outline">{networkEntries.length}</Badge>
+              {showNetworkLedger ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            </button>
+            {showNetworkLedger && (
+              <div className="mt-3 max-h-[300px] overflow-y-auto divide-y divide-border">
+                {networkEntries.length === 0 ? (
+                  <p className="py-3 text-sm text-muted-foreground dark:text-muted-foreground/70">{t('diagnosticLogsPanel.no-logs-yet')}</p>
+                ) : (
+                  [...networkEntries].reverse().slice(0, 100).map(entry => {
+                    const entryData = entry.data as Record<string, unknown> | undefined;
+                    return (
+                      <div key={entry.id} className="py-2">
+                        <div className="flex items-center space-x-2">
+                          <Badge variant={LEVEL_BADGE_VARIANTS[entry.level]}>{entry.level}</Badge>
+                          <span className="text-xs text-muted-foreground dark:text-muted-foreground" title={entry.timestamp}>{formatRelativeTime(entry.timestamp)}</span>
+                          <span className="text-xs font-mono break-all text-foreground dark:text-foreground">{entry.message}</span>
+                        </div>
+                        {entryData?.durationMs != null && (
+                          <p className="text-xs text-muted-foreground dark:text-muted-foreground mt-0.5 font-mono">
+                            {String(entryData.durationMs)}ms{entryData.responseContentType != null ? ` · ${String(entryData.responseContentType)}` : ''}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Log Entry List */}
         <section className="bg-card dark:bg-card rounded-lg border border-border dark:border-border overflow-hidden">
@@ -609,7 +781,7 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
                       role={hasHttpDetail ? 'button' : undefined}
                       tabIndex={hasHttpDetail ? 0 : undefined}
                       aria-label={hasHttpDetail ? t('diagnosticLogsPanel.view-http-details-v1-v2', { v1: entry.module, v2: entry.message }) : undefined}
-                      className={`px-4 py-3 transition-colors ${hasHttpDetail ? 'cursor-pointer hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset' : ''}`}
+                      className={`px-4 py-3 transition-colors ${hasHttpDetail ? 'cursor-pointer hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--ui-focus-ring) focus-visible:ring-inset' : ''}`}
                       onClick={hasHttpDetail ? () => setDetailEntry(entry) : undefined}
                       onKeyDown={hasHttpDetail ? (event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
@@ -620,9 +792,7 @@ export const DiagnosticLogsPanel: React.FC<DiagnosticLogsPanelProps> = ({ t }) =
                     >
                       <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                         <Badge variant={LEVEL_BADGE_VARIANTS[entry.level]}>{entry.level}</Badge>
-                        <Badge variant="secondary">
-                          {entry.source === 'frontend' ? t('diagnosticLogsPanel.fe') : t('diagnosticLogsPanel.be')}
-                        </Badge>
+                        <Badge variant="secondary">{sourceBadgeLabel(entry.source, t)}</Badge>
                         <Badge variant="outline">
                           {language === 'zh' ? EVENT_TYPE_LABELS[eventType].zh : EVENT_TYPE_LABELS[eventType].en}
                         </Badge>

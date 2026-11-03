@@ -8,7 +8,7 @@ const SENSITIVE_FIELD_NAMES = new Set([
   'apiKey', 'api_key', 'api_key_encrypted', 'password', 'password_encrypted',
   'secret', 'token', 'githubToken', 'accessToken', 'authorization',
   'x-api-key', 'credentials', 'passwd', 'pwd', 'backendApiSecret',
-  'mcp_token', 'mcpToken', 'authToken', 'auth_token',
+  'mcp_token', 'mcpToken', 'authToken', 'auth_token', 'ct0',
 ]);
 
 // URL query param keys to redact
@@ -95,7 +95,7 @@ function looksLikeSecret(value: string): boolean {
 /**
  * Detect if a string looks like an email address.
  */
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
 
 /**
  * Recursively sanitize an object for logging.
@@ -198,16 +198,49 @@ function sanitizeHeaders(headers: Record<string, unknown>, seen: WeakSet<object>
 }
 
 /**
+ * Substring-level redaction for free-form error text (messages, stacks).
+ * sanitizeString only recognizes values that match a pattern in full, so a
+ * credential embedded inside prose would otherwise survive into the journal.
+ * Order matters: URL first (it may contain tokens), then scheme-prefixed
+ * credentials, then bare token shapes, then emails. Every sanitizer copy
+ * (redact.js, renderer, backend) keeps this list byte-identical and is pinned
+ * by the shared errorMessages vectors.
+ */
+export function redactInline(text: string): string {
+  return String(text)
+    .replace(/https?:\/\/[^\s"'<>]+/g, (url) => redactUrl(url))
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 ***')
+    .replace(/\bghp_[A-Za-z0-9]{36}\b/g, (value) => maskSecret(value))
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, (value) => maskSecret(value))
+    .replace(/\bgsm_mcp_\S+/g, (value) => maskSecret(value))
+    .replace(/[^@\s"'<>]+@[^@\s"'<>]+\.[A-Za-z]{2,}/g, (value) => maskEmail(value));
+}
+
+/** Maximum sanitized stack length kept per error. */
+const MAX_STACK_LENGTH = 8000;
+
+/** Maximum sanitized name length kept per error. */
+const MAX_NAME_LENGTH = 120;
+
+/**
  * Sanitize an Error object for logging.
  * Extracts message and stack, sanitizes any embedded secrets.
+ * DOMException is handled explicitly: in some runtimes it does not inherit
+ * from Error, and the previous `instanceof Error` guard would degrade it to
+ * a message-only string, losing the independent name/stack fields.
+ * The name is inline-redacted and capped too — custom error names are free-form
+ * strings and can carry embedded credentials just like messages.
  */
 export function sanitizeError(err: unknown): { message: string; stack?: string; name?: string } {
-  if (!(err instanceof Error)) {
-    return { message: sanitizeString(String(err)) };
+  const isErrorLike = err instanceof Error
+    || (typeof DOMException !== 'undefined' && err instanceof DOMException);
+  if (!isErrorLike) {
+    return { message: redactInline(sanitizeString(String(err))) };
   }
+  const { name, message, stack } = err as Error;
   return {
-    name: err.name,
-    message: sanitizeString(err.message),
-    stack: err.stack ? sanitizeString(err.stack) : undefined,
+    name: redactInline(sanitizeString(String(name ?? ''))).slice(0, MAX_NAME_LENGTH),
+    message: redactInline(sanitizeString(message)),
+    stack: stack ? redactInline(sanitizeString(stack)).slice(0, MAX_STACK_LENGTH) : undefined,
   };
 }

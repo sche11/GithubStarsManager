@@ -40,6 +40,35 @@ test('rejects non-GitHub and non-HTTPS asset URLs', () => {
   assert.throws(() => catalog.update({ repositories: [], releases: [input] }), { code: 'PLUGIN_SNAPSHOT_INVALID' });
 });
 
+test('snapshot truncates releases with more than 500 assets instead of rejecting', () => {
+  const catalog = createPluginCatalog();
+  const oversized = release();
+  oversized.assets = Array.from({ length: 600 }, (_, index) => ({
+    id: 10 + index,
+    name: `asset-${index}.zip`, size: 1, download_count: 0,
+    browser_download_url: `https://github.com/owner/project/releases/download/v1.0.0/asset-${index}.zip`,
+    content_type: 'application/octet-stream', created_at: '2026-01-04', updated_at: '2026-01-04',
+  }));
+
+  assert.deepEqual(catalog.update({ repositories: [repository()], releases: [oversized] }), { repositories: 1, releases: 1 });
+  assert.equal(catalog.getRelease(2).assets.length, 500);
+  assert.equal(catalog.getRelease(2).assets[0].name, 'asset-0.zip');
+  assert.equal(catalog.getDownloadAsset(2, 10).asset.browser_download_url.includes('asset-0.zip'), true);
+});
+
+test('direct plugin release submissions keep the strict 500-asset limit', () => {
+  const catalog = createPluginCatalog();
+  const oversized = release();
+  oversized.assets = Array.from({ length: 501 }, (_, index) => ({
+    id: 10 + index,
+    name: `asset-${index}.zip`, size: 1, download_count: 0,
+    browser_download_url: `https://github.com/owner/project/releases/download/v1.0.0/asset-${index}.zip`,
+    content_type: 'application/octet-stream', created_at: '2026-01-04', updated_at: '2026-01-04',
+  }));
+
+  assert.throws(() => catalog.upsert(repository(), oversized));
+});
+
 test('does not partially update a repository when release validation fails', () => {
   const catalog = createPluginCatalog();
   const invalidRelease = release();
@@ -48,4 +77,68 @@ test('does not partially update a repository when release validation fails', () 
   assert.throws(() => catalog.upsert(repository(), invalidRelease), { code: 'PLUGIN_SNAPSHOT_INVALID' });
   assert.equal(catalog.getRepository(1), null);
   assert.equal(catalog.getRelease(2), null);
+});
+
+test('measures the size budget against the retained snapshot, not the raw payload', () => {
+  const catalog = createPluginCatalog();
+  const noisy = repository();
+  // Local-only metadata the Host never stores (AI summaries, custom overrides, …)
+  // must not count against the documented 64 MiB snapshot budget, otherwise the
+  // renderer logs 'Plugin data snapshot exceeds the size limit' on every change.
+  noisy.ai_summary = 'x'.repeat(65 * 1024 * 1024);
+
+  assert.deepEqual(
+    catalog.update({ repositories: [noisy], releases: [release()] }),
+    { repositories: 1, releases: 1 }
+  );
+  assert.equal(catalog.getRepository(1).full_name, 'owner/project');
+  assert.equal('ai_summary' in catalog.getRepository(1), false);
+});
+
+test('rejects a retained snapshot that exceeds the size budget', () => {
+  const catalog = createPluginCatalog();
+  // `body` is retained (capped at 256 KiB per release), so plenty of releases
+  // still overflow the budget once sanitized.
+  const releases = Array.from({ length: 300 }, (_, index) => ({
+    ...release(),
+    id: 1000 + index,
+    body: 'x'.repeat(300 * 1024),
+  }));
+
+  assert.throws(() => catalog.update({ repositories: [], releases }), {
+    code: 'PLUGIN_SNAPSHOT_INVALID',
+    message: 'Plugin data snapshot exceeds the size limit',
+  });
+});
+
+test('counts each release ID once in the size budget', () => {
+  const catalog = createPluginCatalog();
+  // Only the last record per ID is retained, so 300 copies of one release —
+  // each just under the 256 KiB body cap — stay far below the 64 MiB budget.
+  // Measuring every incoming record instead reports ~75 MiB and rejects a
+  // snapshot the Host keeps as a single release.
+  const duplicates = Array.from({ length: 300 }, () => ({
+    ...release(),
+    body: 'x'.repeat(300 * 1024),
+  }));
+
+  assert.deepEqual(
+    catalog.update({ repositories: [], releases: duplicates }),
+    { repositories: 0, releases: 1 }
+  );
+  assert.equal(catalog.getRelease(2).body.length, 256 * 1024);
+});
+
+test('counts retained browser_download_url assets against the size budget', () => {
+  const catalog = createPluginCatalog();
+  // `browser_download_url` lives in the retained `assets`, not in the
+  // sanitized `public` record, so an oversized URL has to hit the budget.
+  const oversized = release();
+  oversized.assets[0].browser_download_url =
+    `https://github.com/owner/project/releases/download/v1.0.0/${'a'.repeat(65 * 1024 * 1024)}`;
+
+  assert.throws(() => catalog.update({ repositories: [], releases: [oversized] }), {
+    code: 'PLUGIN_SNAPSHOT_INVALID',
+    message: 'Plugin data snapshot exceeds the size limit',
+  });
 });

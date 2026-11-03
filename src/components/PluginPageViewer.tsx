@@ -3,7 +3,9 @@ import { TranslateFn } from '../i18n/useT';
 import React, { useEffect, useRef, useState } from 'react';
 import { pluginClient } from '../plugins/pluginClient';
 import { validatePluginPageMessage } from '../plugins/pluginPageMessages';
+import { usePluginAccountTag } from '../features/plugins/hooks/usePluginAccountTag';
 import { usePluginAI } from '../features/plugins/hooks/usePluginAI';
+import { usePluginNetwork } from '../features/plugins/hooks/usePluginNetwork';
 import { usePluginWebSearch } from '../features/plugins/hooks/usePluginWebSearch';
 
 interface PluginPageViewerProps {
@@ -13,10 +15,19 @@ interface PluginPageViewerProps {
   pageTitle: string;
   onClose: () => void;
   t: TranslateFn;
+  /** modal：在弹窗内使用，隐藏自带标题栏（由外层 Modal 提供标题与关闭按钮）。 */
+  variant?: 'panel' | 'modal';
+  /** 随 plugin-page:init 一次性下发给页面的上下文（如仓库元数据），不走能力桥。 */
+  initContext?: Record<string, unknown>;
 }
 
-export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pluginName, pageId, pageTitle, onClose, t }) => {
+export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pluginName, pageId, pageTitle, onClose, t, variant = 'panel', initContext }) => {
+  const isModal = variant === 'modal';
+  // 账号标签随 init 下发给页面：页面据此在绘制本地缓存前完成账号校验。
+  // 标签解析是异步的（SHA-256），就绪前不渲染 iframe，避免首帧缺标签绕过校验。
+  const accountTag = usePluginAccountTag();
   const generateAI = usePluginAI();
+  const requestNetwork = usePluginNetwork();
   const searchWeb = usePluginWebSearch();
   const frameRef = useRef<HTMLIFrameElement>(null);
   const tokenRef = useRef(crypto.randomUUID());
@@ -24,6 +35,9 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
   const requestTimesRef = useRef<number[]>([]);
   const mountedRef = useRef(true);
   const aiRequestsRef = useRef(new Set<AbortController>());
+  // network.request 的在途请求：页面卸载/重载时中止，避免带着 Token 的请求
+  // 在结果无人消费后继续跑完（ai.generate 已有同款机制）。
+  const networkSignalRef = useRef<AbortController>(new AbortController());
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,6 +47,7 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
     return () => {
       mountedRef.current = false;
       for (const controller of aiRequests) controller.abort();
+      networkSignalRef.current.abort();
     };
   }, []);
 
@@ -48,6 +63,24 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
     return () => { disposed = true; };
   }, [pluginId, pageId, t]);
 
+  const initContextRef = useRef(initContext);
+  initContextRef.current = initContext;
+  const accountTagRef = useRef(accountTag);
+  accountTagRef.current = accountTag;
+
+  // init 只在 iframe onLoad 时发送一次，而弹窗上下文（如 README）是异步到位的。
+  // 页面已初始化后上下文发生变化时补发一次，携带同一 token，页面按新上下文刷新。
+  const initContextSignature = JSON.stringify(initContext ?? null);
+  useEffect(() => {
+    const frameWindow = frameRef.current?.contentWindow;
+    if (!frameWindow || !tokenRef.current || !initContextRef.current) return;
+    frameWindow.postMessage({
+      type: 'plugin-page:init', pluginId, pageId, token: tokenRef.current,
+      context: { ...initContextRef.current, accountTag: accountTagRef.current },
+    }, `plugin-page://${pluginId}`);
+    // initContextSignature 只用来触发重发；实际载荷取 ref，避免把对象身份放进依赖。
+  }, [initContextSignature, pluginId, pageId, accountTag]);
+
   useEffect(() => {
     const onMessage = async (event: MessageEvent) => {
       const request = validatePluginPageMessage(event, frameRef.current?.contentWindow ?? null, pluginId, pageId, tokenRef.current);
@@ -58,7 +91,7 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
           type: 'plugin-page:response', pluginId, pageId,
           requestId: request.requestId, token: tokenRef.current,
           success: false, error: { code, message },
-        }, '*');
+        }, `plugin-page://${pluginId}`);
       };
       if (pendingRef.current.has(pendingKey) || pendingRef.current.size >= 8) {
         rejectRequest('PLUGIN_PAGE_RATE_LIMITED', 'Plugin page request limit exceeded');
@@ -76,7 +109,12 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
         rejectRequest('PLUGIN_PAGE_REQUEST_TOO_LARGE', 'Plugin page request arguments are not serializable');
         return;
       }
-      if (requestSize > 1024 * 1024) {
+      // 与主进程 pluginPageBridge 的预算一致：截图导出回传二进制，放宽到
+      // 10 MiB；其余方法维持 1 MiB。这里先拦一层，避免大载荷进 IPC。
+      const sizeLimit = request.method === 'clipboard.writeImage' || request.method === 'downloads.saveFile'
+        ? 10 * 1024 * 1024
+        : 1024 * 1024;
+      if (requestSize > sizeLimit) {
         rejectRequest('PLUGIN_PAGE_REQUEST_TOO_LARGE', 'Plugin page request exceeds the size limit');
         return;
       }
@@ -93,7 +131,11 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
             : request.method === 'web.search'
               ? await searchWeb(pluginId, pluginName, pageId, request.args,
                 () => mountedRef.current && tokenRef.current === requestToken)
-            : await pluginClient.requestPageCapability({ pluginId, pageId, method: request.method, args: request.args });
+            : request.method === 'network.request'
+              ? await requestNetwork(pluginId, pageId, request.args,
+                () => mountedRef.current && tokenRef.current === requestToken,
+                networkSignalRef.current.signal)
+              : await pluginClient.requestPageCapability({ pluginId, pageId, method: request.method, args: request.args });
         } catch {
           result = { success: false as const, error: { code: 'PLUGIN_PAGE_REQUEST_FAILED', message: 'Host request failed' } };
         }
@@ -101,7 +143,7 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
         frameRef.current?.contentWindow?.postMessage({
           type: 'plugin-page:response', pluginId, pageId,
           requestId: request.requestId, token: requestToken, ...result,
-        }, '*');
+        }, `plugin-page://${pluginId}`);
       } finally {
         pendingRef.current.delete(pendingKey);
         if (aiController) aiRequestsRef.current.delete(aiController);
@@ -109,34 +151,48 @@ export const PluginPageViewer: React.FC<PluginPageViewerProps> = ({ pluginId, pl
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [pluginId, pageId, pluginName, generateAI, searchWeb, t]);
+  }, [pluginId, pageId, pluginName, generateAI, requestNetwork, searchWeb, t]);
 
   return (
-    <section className="space-y-3" aria-label={`${pluginName}: ${pageTitle}`}>
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h3 className="font-semibold">{pluginName} · {pageTitle}</h3>
-          <p className="text-xs text-muted-foreground">{t('pluginPageViewer.this-page-comes-from-a-local-plugin-data-request')}</p>
+    <section
+      className={isModal ? 'flex h-full min-h-0 flex-1 flex-col gap-3' : 'space-y-3'}
+      aria-label={`${pluginName}: ${pageTitle}`}
+    >
+      {!isModal && (
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold">{pluginName} · {pageTitle}</h3>
+            <p className="text-xs text-muted-foreground">{t('pluginPageViewer.this-page-comes-from-a-local-plugin-data-request')}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded border border-border px-3 py-1.5 text-sm">
+            {t('pluginPageViewer.back-to-plugins')}
+          </button>
         </div>
-        <button type="button" onClick={onClose} className="rounded border border-border px-3 py-1.5 text-sm">
-          {t('pluginPageViewer.back-to-plugins')}
-        </button>
-      </div>
+      )}
+      {isModal && (
+        <p className="shrink-0 text-xs text-muted-foreground">{t('pluginPageViewer.this-page-comes-from-a-local-plugin-data-request')}</p>
+      )}
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> :
-        url ? <iframe
+        url && accountTag ? <iframe
           ref={frameRef}
           title={`${pluginName}: ${pageTitle}`}
           src={url}
-          sandbox="allow-scripts"
+          sandbox="allow-scripts allow-same-origin"
           referrerPolicy="no-referrer"
-          className="h-[min(70vh,800px)] min-h-[480px] w-full rounded-lg border border-border bg-white"
+          className={isModal
+            ? 'min-h-0 w-full flex-1 rounded-lg border border-border bg-white'
+            : 'h-[min(70vh,800px)] min-h-[480px] w-full rounded-lg border border-border bg-white'}
           onLoad={() => {
             for (const controller of aiRequestsRef.current) controller.abort();
+            // 先中止旧 epoch 的在途请求再轮换，避免它们带着 Token 继续跑完。
+            networkSignalRef.current.abort();
+            networkSignalRef.current = new AbortController();
             tokenRef.current = crypto.randomUUID();
             pendingRef.current.clear();
             frameRef.current?.contentWindow?.postMessage({
               type: 'plugin-page:init', pluginId, pageId, token: tokenRef.current,
-            }, '*');
+              ...(initContextRef.current ? { context: { ...initContextRef.current, accountTag: accountTagRef.current } } : {}),
+            }, `plugin-page://${pluginId}`);
           }}
         /> : <p role="status">{t('pluginPageViewer.loading-plugin-page')}</p>}
     </section>

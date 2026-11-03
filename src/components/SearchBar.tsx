@@ -15,7 +15,6 @@ import { useSearchShortcuts } from '../hooks/useSearchShortcuts';
 import { useSearchActions } from '../features/repositories/hooks/useSearchActions';
 import { useDialog } from '../hooks/useDialog';
 import { isRepoCustomized } from '../utils/repoUtils';
-import { repositoryChatStorage } from '../services/repositoryChatStorage';
 import { applyRepoFilters, performBasicTextSearch as basicTextSearch, sortRepositories } from '../utils/repoSearch';
 import { NO_LICENSE_SENTINEL, normalizeLicense } from '../utils/licenseFilter';
 import { NumberInput } from './ui/NumberInput';
@@ -113,41 +112,25 @@ export const SearchBar: React.FC = () => {
   
   const [showFilters, setShowFilters] = useState(false);
   const [searchQuery, setSearchQuery] = useState(searchFilters.query);
+  const previousStoredQueryRef = useRef(searchFilters.query);
   const [availableLanguages, setAvailableLanguages] = useState<string[]>([]);
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [availablePlatforms, setAvailablePlatforms] = useState<string[]>([]);
   const [availableLicenses, setAvailableLicenses] = useState<string[]>([]);
   const [isRealTimeSearch, setIsRealTimeSearch] = useState(false);
   const [isComposing, setIsComposing] = useState(false);
-  // S4 全局问答历史入口：徽标显示已保存会话数。
-  const [globalHistoryCount, setGlobalHistoryCount] = useState(0);
-  // 重叠刷新只允许最新请求提交，避免旧数量覆盖新状态。
-  const globalHistoryRequestRef = useRef(0);
 
+  // External actions such as Quick Access clear the committed query without
+  // touching the local input. Only mirror real store changes so active typing
+  // remains local until Enter or real-time search commits it.
   useEffect(() => {
-    let cancelled = false;
-    const refreshGlobalHistoryCount = async () => {
-      const requestId = ++globalHistoryRequestRef.current;
-      try {
-        const sessions = await repositoryChatStorage.listRecentSessions(100);
-        if (!cancelled && requestId === globalHistoryRequestRef.current) setGlobalHistoryCount(sessions.length);
-      } catch {
-        if (!cancelled && requestId === globalHistoryRequestRef.current) setGlobalHistoryCount(0);
-      }
-    };
-    void refreshGlobalHistoryCount();
-    // 删除会话时由历史抽屉广播；打开抽屉与窗口重获焦点时也刷新，
-    // 覆盖单仓问答内新建会话导致的计数过期。
-    window.addEventListener('gsm:global-chat-history-changed', refreshGlobalHistoryCount);
-    window.addEventListener('gsm:open-global-chat-history', refreshGlobalHistoryCount);
-    window.addEventListener('focus', refreshGlobalHistoryCount);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('gsm:global-chat-history-changed', refreshGlobalHistoryCount);
-      window.removeEventListener('gsm:open-global-chat-history', refreshGlobalHistoryCount);
-      window.removeEventListener('focus', refreshGlobalHistoryCount);
-    };
-  }, []);
+    if (searchFilters.query === previousStoredQueryRef.current) return;
+    const previousStoredQuery = previousStoredQueryRef.current;
+    previousStoredQueryRef.current = searchFilters.query;
+    // 输入框已有未提交修改时不回写：异步到达的旧查询不得覆盖正在输入的内容
+    if (searchQuery !== previousStoredQuery) return;
+    setSearchQuery(searchFilters.query);
+  }, [searchFilters.query, searchQuery]);
 
   const openGlobalChatHistory = () => {
     window.dispatchEvent(new CustomEvent('gsm:open-global-chat-history'));
@@ -666,10 +649,10 @@ export const SearchBar: React.FC = () => {
 
   return (
     <TooltipProvider>
-      <div className="ui-toolbar p-4 sm:p-5 mb-5">
+      <div className="ui-toolbar app-command-panel p-4 sm:p-5 mb-5">
       {/* Search Input */}
-      <div className="relative z-40 mb-4">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="app-command-row relative z-40 mb-4">
+        <div className="flex w-full min-w-0 flex-1 items-center gap-2">
           <div className="relative min-w-0 flex-1">
         <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground dark:text-muted-foreground/70 w-5 h-5" />
         <Input
@@ -686,7 +669,7 @@ export const SearchBar: React.FC = () => {
           onBlur={handleInputBlur}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
-          className="h-10 w-full pl-10 pr-3"
+          className="app-command-input h-10 w-full pl-10 pr-3"
         />
 
         {/* Search History Dropdown */}
@@ -790,6 +773,17 @@ export const SearchBar: React.FC = () => {
             <Bot className="w-4 h-4" />
             <span className="hidden sm:inline">{isSearching ? t('searchBar.ai-searching') : t('searchBar.ai-search')}</span>
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={openGlobalChatHistory}
+            className="app-command-secondary-action app-repository-secondary-action flex items-center gap-2 px-3 text-sm"
+            aria-label={t('searchBar.chat-history')}
+            title={t('searchBar.view-chat-history-across-repositories')}
+          >
+            <History className="h-4 w-4" aria-hidden="true" />
+            <span className="hidden sm:inline">{t('searchBar.chat-history')}</span>
+          </Button>
           {isSearching && searchPhase && (
             <span className="max-w-[12rem] truncate text-xs text-muted-foreground dark:text-muted-foreground animate-pulse whitespace-nowrap">
               {searchPhase}
@@ -820,7 +814,7 @@ export const SearchBar: React.FC = () => {
 
       {/* Search Status Indicator */}
       {searchQuery && (
-        <div className="mb-4 flex items-center justify-between text-sm">
+        <div className="app-command-status mb-4 flex items-center justify-between text-sm">
           <div className="flex items-center space-x-2">
             {isRealTimeSearch ? (
               <div className="flex items-center space-x-2 text-primary dark:text-primary">
@@ -843,14 +837,14 @@ export const SearchBar: React.FC = () => {
       )}
 
       {/* Filter Controls */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+      <div className="app-command-filters flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="app-command-filter-group flex flex-wrap items-center gap-2 sm:gap-3">
           <Button
             variant="ghost"
             aria-expanded={showFilters}
             aria-controls="advanced-filters-panel"
             onClick={() => setShowFilters(!showFilters)}
-            className={`linear-filter-toggle flex items-center space-x-2 px-3 py-2 text-sm ${
+            className={`linear-filter-toggle app-repository-secondary-action flex items-center space-x-2 px-3 py-2 text-sm ${
               showFilters || activeFiltersCount > 0 ? 'is-active' : ''
             }`}
           >
@@ -866,25 +860,8 @@ export const SearchBar: React.FC = () => {
           <Button
             type="button"
             variant="ghost"
-            onClick={openGlobalChatHistory}
-            className="linear-filter-toggle flex items-center space-x-2 px-3 py-2 text-sm"
-            aria-label={t('searchBar.chat-history')}
-            title={t('searchBar.view-chat-history-across-repositories')}
-          >
-            <History className="w-4 h-4" aria-hidden="true" />
-            <span>{t('searchBar.chat-history')}</span>
-            {globalHistoryCount > 0 && (
-              <span className="bg-primary text-primary-foreground rounded-full px-2 py-0.5 text-xs">
-                {globalHistoryCount > 99 ? '99+' : globalHistoryCount}
-              </span>
-            )}
-          </Button>
-
-          <Button
-            type="button"
-            variant="ghost"
             onClick={() => setBatchStarOpen(true)}
-            className="linear-filter-toggle flex items-center space-x-2 px-3 py-2 text-sm"
+            className="linear-filter-toggle app-repository-secondary-action flex items-center space-x-2 px-3 py-2 text-sm"
           >
             <Link2 className="w-4 h-4" aria-hidden="true" />
             <span>{repositoryT('batchStar.title')}</span>
@@ -904,7 +881,7 @@ export const SearchBar: React.FC = () => {
         </div>
 
         {/* Sort Controls + Sync Button */}
-        <div className="flex items-center gap-2 relative z-30">
+        <div className="app-command-controls relative z-30 flex items-center gap-2">
           <SortByDropdown
             value={searchFilters.sortBy}
             onChange={(value) => setSearchFilters({ sortBy: value })}
@@ -989,7 +966,7 @@ export const SearchBar: React.FC = () => {
 
       {/* Advanced Filters */}
       {showFilters && (
-        <div id="advanced-filters-panel" className="mt-5 pt-5 border-t ui-divider space-y-5">
+        <div id="advanced-filters-panel" className="app-command-filter-panel">
           {/* Status Filters */}
           <div>
             <h4 className="text-sm font-medium text-foreground dark:text-foreground mb-3">
@@ -1284,7 +1261,7 @@ export const SearchBar: React.FC = () => {
                   step={1}
                   placeholder="0"
                   allowUndefined
-                  className="w-24 text-sm py-1.5 dark:bg-muted/40"
+                  className="app-star-range-input w-24 text-sm dark:bg-muted/40"
                 />
               </div>
               <div className="flex items-center space-x-2">
@@ -1299,7 +1276,7 @@ export const SearchBar: React.FC = () => {
                   step={1}
                   placeholder="∞"
                   allowUndefined
-                  className="w-24 text-sm py-1.5 dark:bg-muted/40"
+                  className="app-star-range-input w-24 text-sm dark:bg-muted/40"
                 />
               </div>
             </div>

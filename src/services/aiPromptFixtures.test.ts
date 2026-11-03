@@ -158,6 +158,26 @@ const buildAIServiceFixtures = async (language: 'zh' | 'en') => {
       releaseName: 'Summer release',
     }));
   result.generateHyDEQuery = await captureRequests(() => makeService().generateHyDEQuery('react state management library'));
+  result.analyzeVectorSearchQuery = await captureRequests(() =>
+    makeService().analyzeVectorSearchQuery('优化 GitHub README 的技能'));
+  result.analyzeSimilarRepositorySource = await captureRequests(() =>
+    makeService().analyzeSimilarRepositorySource(repo, README));
+  result.rerankRepositoriesGraded = await captureRequests(() =>
+    makeService().rerankRepositoriesGraded([repo, repoB], 'state management', null));
+  result.rerankSimilarRepositoriesGraded = await captureRequests(() =>
+    makeService().rerankSimilarRepositoriesGraded(repo, [repoB, repo], {
+      intent: 'manage react state',
+      keywords: ['react', 'state'],
+      idealDescription: 'A peer library for managing React state.',
+      facets: {
+        artifact: ['library'],
+        action: ['manage'],
+        domain: ['react state'],
+        platform: [],
+      },
+      highPrecisionTerms: ['react', 'state'],
+      lowConfidenceFacets: [],
+    }));
   result.searchRepositoriesWithSemanticReranking = await captureRequests(() =>
     makeService().searchRepositoriesWithSemanticReranking([repo, repoB], 'state management'));
   result.searchGistsWithReranking = await captureRequests(() =>
@@ -186,20 +206,32 @@ const buildChatServiceFixtures = (language: 'zh' | 'en') => {
   const evidences = [makeEvidenceForFixture(repo)];
   const result: Record<string, unknown> = {};
 
-  result.ANSWER_FORMAT_DIRECTIVE = ANSWER_FORMAT_DIRECTIVE(language);
+  result.ANSWER_FORMAT_DIRECTIVE = {
+    installation: ANSWER_FORMAT_DIRECTIVE(language, 'installation'),
+    configuration: ANSWER_FORMAT_DIRECTIVE(language, 'configuration'),
+    deployment: ANSWER_FORMAT_DIRECTIVE(language, 'deployment'),
+    general: ANSWER_FORMAT_DIRECTIVE(language, 'feature_overview'),
+    architecture: ANSWER_FORMAT_DIRECTIVE(language, 'architecture'),
+  };
   result.ANSWER_LENGTH_DIRECTIVE = {
-    quick: ANSWER_LENGTH_DIRECTIVE(language, 'quick'),
-    default: ANSWER_LENGTH_DIRECTIVE(language, 'default'),
-    deep: ANSWER_LENGTH_DIRECTIVE(language, 'deep'),
-    unlimited: ANSWER_LENGTH_DIRECTIVE(language, 'unlimited'),
+    installation: ANSWER_LENGTH_DIRECTIVE(language, 'installation'),
+    configuration: ANSWER_LENGTH_DIRECTIVE(language, 'configuration'),
+    deployment: ANSWER_LENGTH_DIRECTIVE(language, 'deployment'),
+    general: ANSWER_LENGTH_DIRECTIVE(language, 'feature_overview'),
+    architecture: ANSWER_LENGTH_DIRECTIVE(language, 'architecture'),
+    troubleshooting: ANSWER_LENGTH_DIRECTIVE(language, 'troubleshooting'),
+    creative: ANSWER_LENGTH_DIRECTIVE(language, 'creative'),
   };
   result.buildSystemPrompt = {
-    quick: buildSystemPrompt(language, 'quick'),
-    default: buildSystemPrompt(language, 'default'),
-    deep: buildSystemPrompt(language, 'deep'),
-    unlimited: buildSystemPrompt(language, 'unlimited'),
+    installation: buildSystemPrompt(language, 'installation'),
+    configuration: buildSystemPrompt(language, 'configuration'),
+    deployment: buildSystemPrompt(language, 'deployment'),
+    general: buildSystemPrompt(language, 'feature_overview'),
+    architecture: buildSystemPrompt(language, 'architecture'),
+    troubleshooting: buildSystemPrompt(language, 'troubleshooting'),
+    creative: buildSystemPrompt(language, 'creative'),
   };
-  result.buildUserPrompt = buildUserPrompt(chatInput, evidences);
+  result.buildUserPrompt = buildUserPrompt(chatInput, evidences, 'deployment');
   result.sourceBoundEvidenceDigest = sourceBoundEvidenceDigest(chatInput, evidences);
   result.noVerifiedSummaryResponse = noVerifiedSummaryResponse(language);
   result.pruneUnverifiableSections = pruneUnverifiableSections(
@@ -210,7 +242,7 @@ const buildChatServiceFixtures = (language: 'zh' | 'en') => {
       '',
       '## Extra',
       '',
-      'An uncited claim that should be pruned.',
+      'Version 2.0 is an uncited claim that should be pruned.',
     ].join('\n'),
     evidences,
     language,

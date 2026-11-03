@@ -1,5 +1,6 @@
 {
   "batchStar": {
+    "token-permission-error": "GitHub がこのトークンを拒否しました（403）。Star の確認や追加には、Fine-grained トークンで Starring の読み書きと Metadata の読み取り、またはクラシックトークンで public_repo（非公開リポジトリは repo）が必要です。",
     "title": "リンクからスター",
     "hint": "GitHub リンクを含むテキストを貼り付け、リポジトリを確認してから Star を付けます。他のサイトのリンクは無視されます。",
     "history": "貼り付け履歴",
@@ -304,7 +305,7 @@
     "no": "いいえ",
     "v1-year": "{{v1}} / 年",
     "v1-days-years-years": "{{v1}} 日（約 {{years}} 年）",
-    "repository-health-facts": "リポジトリの健全性ファクト",
+    "repository-health-facts": "リポジトリの概要",
     "these-are-objective-facts-with-no-overall-score": "これらは客観的な事実であり、総合スコアはありません。「不明」はまだ取得していないことを意味します。"
   }
 }

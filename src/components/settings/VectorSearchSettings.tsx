@@ -6,6 +6,7 @@ import { Badge } from '../ui/badge';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Switch } from '../ui/switch';
 import { NumberInput } from '../ui/NumberInput';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs';
 import React, { useState } from 'react';
 import {
   Search,
@@ -165,6 +166,77 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         />
       </div>
 
+      {/* Index actions: rebuild / incremental (independent of the numbered config steps below) */}
+      <div className="border border-border rounded-lg p-4 space-y-4">
+        <h3 className="font-medium text-foreground dark:text-foreground flex items-center gap-2">
+          <Zap className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+          {t('vectorSearchSettings.index-management')}
+        </h3>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={handleRebuildIndex}
+            disabled={isIndexing || !isConfigComplete}
+            className="flex items-center gap-2 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isIndexing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            {t('vectorSearchSettings.rebuild-vector-index')}
+          </Button>
+          <Button
+            onClick={handleIncrementalIndex}
+            disabled={isIndexing || !isConfigComplete || incrementalTargetCount === 0}
+            className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm text-accent-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isIndexing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            {t('vectorSearchSettings.incremental-index')}
+            {incrementalTargetCount > 0 && (
+              <Badge className="ml-1">{incrementalTargetCount}</Badge>
+            )}
+          </Button>
+          {isIndexing && (
+            <Button
+              onClick={handleAbortIndexing}
+              variant="destructive"
+              className="h-9 gap-2 px-4 text-sm"
+            >
+              <Square className="w-4 h-4" />
+              {t('vectorSearchSettings.abort')}
+            </Button>
+          )}
+        </div>
+
+        {isIndexing && phaseTotal > 0 && (
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-muted-foreground dark:text-muted-foreground">
+              <span>
+                {phase === 'readme' && t('vectorSearchSettings.fetching-readme')}
+                {phase === 'embedding' && t('vectorSearchSettings.generating-embeddings')}
+                {phase === 'uploading' && t('vectorSearchSettings.uploading-vectors')}
+                {!phase && t('vectorSearchSettings.preparing')}
+              </span>
+              <span>
+                {phaseDone}/{phaseTotal} ({Math.round((phaseDone / phaseTotal) * 100)}%)
+              </span>
+            </div>
+            <div className="w-full bg-accent dark:bg-muted rounded-full h-2">
+              <div
+                className="bg-primary h-2 rounded-full transition-all"
+                style={{ width: `${(phaseDone / phaseTotal) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {indexResult && (
+          <Alert variant={indexResult.errors > 0 && indexResult.indexed === 0 ? 'destructive' : 'default'}>
+            <AlertDescription>
+              {t('vectorSearchSettings.indexing-complete')}: {indexResult.indexed} {t('vectorSearchSettings.indexed')}, {indexResult.skipped} {t('vectorSearchSettings.skipped')}, {indexResult.errors} {t('vectorSearchSettings.errors')}
+              {indexResult.error && <div className="mt-1 text-xs">{indexResult.error}</div>}
+            </AlertDescription>
+          </Alert>
+        )}
+      </div>
+
       {/* Section 1: Embedding Model Config */}
       <div className="border border-border rounded-lg p-4 space-y-4">
         <h3 className="font-medium text-foreground dark:text-foreground flex items-center gap-2">
@@ -223,7 +295,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
                 ? 'http://localhost:11434'
                 : 'https://api.example.com/v1/embeddings'
             }
-            className="w-full px-3 py-2 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent"
+            className="w-full px-3 py-2 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent"
           />
         </div>
 
@@ -239,7 +311,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
               value={formApiKey}
               onChange={(e) => setFormApiKey(e.target.value)}
               placeholder={formApiType === 'ollama' ? t('vectorSearchSettings.optional') : 'sk-xxx'}
-              className="w-full px-3 py-2 pr-10 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent"
+              className="w-full px-3 py-2 pr-10 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent"
             />
             <Button
               type="button"
@@ -277,7 +349,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
                 ? 'nomic-embed-text'
                 : 'model-name'
             }
-            className="w-full px-3 py-2 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent"
+            className="w-full px-3 py-2 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent"
           />
         </div>
 
@@ -314,7 +386,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
               {t('vectorSearchSettings.auto-detect')}
             </Button>
           </div>
-          <p className="rounded-lg border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
+          <p className="mt-2 rounded-lg border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
             {t('vectorSearchSettings.must-match-vectorize-index-dimensions')}
           </p>
         </div>
@@ -369,7 +441,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
             value={formWorkerUrl}
             onChange={(e) => setFormWorkerUrl(e.target.value)}
             placeholder="https://github-stars-vectorize.your-name.workers.dev"
-            className="w-full px-3 py-2 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent"
+            className="w-full px-3 py-2 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent"
           />
         </div>
 
@@ -385,7 +457,7 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
               value={formAuthToken}
               onChange={(e) => setFormAuthToken(e.target.value)}
               placeholder={t('vectorSearchSettings.worker-authentication-token')}
-              className="w-full px-3 py-2 pr-10 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-ring focus:border-transparent"
+              className="w-full px-3 py-2 pr-10 text-sm border border-input rounded-md bg-card dark:bg-card text-foreground dark:text-foreground focus:ring-2 focus:ring-(--ui-focus-ring) focus:border-transparent"
             />
             <Button
               type="button"
@@ -483,11 +555,11 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         </div>
       </div>
 
-      {/* Section 4: Actions */}
+      {/* Section 4: Index Content */}
       <div className="border border-border rounded-lg p-4 space-y-4">
         <h3 className="font-medium text-foreground dark:text-foreground flex items-center gap-2">
           <span className="text-xs bg-accent dark:bg-muted px-2 py-0.5 rounded">④</span>
-          {t('vectorSearchSettings.index-management')}
+          {t('vectorSearchSettings.index-content')}
         </h3>
 
         {/* 索引内容选择 */}
@@ -567,71 +639,6 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         >
           {workerSaved ? `✓ ${t('vectorSearchSettings.saved')}` : t('vectorSearchSettings.save-index-config')}
         </Button>
-
-        <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={handleRebuildIndex}
-            disabled={isIndexing || !isConfigComplete}
-            className="flex items-center gap-2 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isIndexing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            {t('vectorSearchSettings.rebuild-vector-index')}
-          </Button>
-          <Button
-            onClick={handleIncrementalIndex}
-            disabled={isIndexing || !isConfigComplete || incrementalTargetCount === 0}
-            className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm text-accent-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isIndexing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            {t('vectorSearchSettings.incremental-index')}
-            {incrementalTargetCount > 0 && (
-              <Badge className="ml-1">{incrementalTargetCount}</Badge>
-            )}
-          </Button>
-          {isIndexing && (
-            <Button
-              onClick={handleAbortIndexing}
-              variant="destructive"
-              className="h-9 gap-2 px-4 text-sm"
-            >
-              <Square className="w-4 h-4" />
-              {t('vectorSearchSettings.abort')}
-            </Button>
-          )}
-        </div>
-
-        {/* Progress */}
-        {isIndexing && phaseTotal > 0 && (
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm text-muted-foreground dark:text-muted-foreground">
-              <span>
-                {phase === 'readme' && `📖 ${t('vectorSearchSettings.fetching-readme')}`}
-                {phase === 'embedding' && `🧠 ${t('vectorSearchSettings.generating-embeddings')}`}
-                {phase === 'uploading' && `☁️ ${t('vectorSearchSettings.uploading-vectors')}`}
-                {!phase && `⏳ ${t('vectorSearchSettings.preparing')}`}
-              </span>
-              <span>
-                {phaseDone}/{phaseTotal} ({Math.round((phaseDone / phaseTotal) * 100)}%)
-              </span>
-            </div>
-            <div className="w-full bg-accent dark:bg-muted rounded-full h-2">
-              <div
-                className="bg-primary h-2 rounded-full transition-all"
-                style={{ width: `${(phaseDone / phaseTotal) * 100}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Result */}
-        {indexResult && (
-          <Alert variant={indexResult.errors > 0 && indexResult.indexed === 0 ? 'destructive' : 'default'}>
-            <AlertDescription>
-              {t('vectorSearchSettings.indexing-complete')}: {indexResult.indexed} {t('vectorSearchSettings.indexed')}, {indexResult.skipped} {t('vectorSearchSettings.skipped')}, {indexResult.errors} {t('vectorSearchSettings.errors')}
-              {indexResult.error && <div className="mt-1 text-xs">{indexResult.error}</div>}
-            </AlertDescription>
-          </Alert>
-        )}
       </div>
 
       {/* Section 5: Search Parameters */}
@@ -794,54 +801,106 @@ export const VectorSearchSettings: React.FC<VectorSearchSettingsProps> = ({ t })
         </div>
 
         <div id="vector-deploy-guide" hidden={!showDeployGuide} className="px-4 pb-4 text-sm text-muted-foreground dark:text-muted-foreground space-y-4">
-            {/* 首次部署 */}
-            <div className="p-3 bg-accent/50 dark:bg-card/50 rounded-md">
-              <p className="font-medium text-foreground dark:text-foreground mb-2">
-                {t('vectorSearchSettings.initial-deployment')}
-              </p>
-              <ol className="list-decimal list-inside space-y-1.5">
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm install -g wrangler</code>
-                  {t('vectorSearchSettings.then')}
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">wrangler login</code>
-                </li>
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">
-                    npx wrangler vectorize create github-stars --dimensions={formDimensions} --metric=cosine
-                  </code>
-                </li>
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">cd cloudflare-worker && npm install</code>
-                </li>
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">wrangler secret put AUTH_TOKEN</code>
-                </li>
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm run deploy</code>
-                </li>
-              </ol>
-            </div>
+          <Tabs defaultValue="one-click" className="w-full">
+            <TabsList className="grid w-full grid-cols-2 mb-3">
+              <TabsTrigger value="one-click" className="text-xs sm:text-sm">
+                {t('vectorSearchSettings.deploy-tab-one-click')}
+              </TabsTrigger>
+              <TabsTrigger value="manual" className="text-xs sm:text-sm">
+                {t('vectorSearchSettings.deploy-tab-manual')}
+              </TabsTrigger>
+            </TabsList>
 
-            {/* 更新部署 */}
-            <div className="p-3 bg-accent/50 dark:bg-card/50 rounded-md">
-              <p className="font-medium text-foreground dark:text-foreground mb-2">
-                {t('vectorSearchSettings.redeploy-after-code-changes')}
-              </p>
-              <ol className="list-decimal list-inside space-y-1.5">
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">cd cloudflare-worker</code>
-                </li>
-                <li>
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm run deploy</code>
-                  {t('vectorSearchSettings.if-dependencies-changed-run')}
-                  <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm install</code>
-                  {t('vectorSearchSettings.text')}
-                </li>
-              </ol>
-              <p className="mt-2 text-xs text-muted-foreground">
-                {t('vectorSearchSettings.note-redeployment-does-not-require-recreating-th')}
-              </p>
-            </div>
+            {/* Tab 1: 一键部署 */}
+            <TabsContent value="one-click" className="space-y-3">
+              <div className="p-4 bg-primary/5 dark:bg-primary/10 border border-primary/20 rounded-lg space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-foreground">
+                    {t('vectorSearchSettings.one-click-deployment-recommended')}
+                  </span>
+                  <Button
+                    onClick={async () => {
+                      const cmd = 'npm run deploy:vector';
+                      try {
+                        await navigator.clipboard.writeText(cmd);
+                        toast(t('vectorSearchSettings.copied'), 'info');
+                      } catch (error) {
+                        console.warn('Failed to copy deploy command:', error);
+                      }
+                    }}
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                  >
+                    {t('vectorSearchSettings.copy-one-click-deploy-cmd')}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {t('vectorSearchSettings.one-click-deploy-desc')}
+                </p>
+                <div className="bg-background/80 dark:bg-background/60 p-2.5 rounded border border-border text-xs font-mono select-all">
+                  npm run deploy:vector {/* i18n-allow-literal */}
+                </div>
+                <div className="pt-2 border-t border-border/40 text-xs text-muted-foreground space-y-1">
+                  <p className="font-medium text-foreground">{t('vectorSearchSettings.one-click-platforms-tip')}</p>
+                  <p>• {t('vectorSearchSettings.platform-mac-linux')}</p>
+                  <p>• {t('vectorSearchSettings.platform-windows')}</p>
+                </div>
+              </div>
+            </TabsContent>
+
+            {/* Tab 2: 手动部署 */}
+            <TabsContent value="manual" className="space-y-3">
+              {/* 首次部署 */}
+              <div className="p-3 bg-accent/50 dark:bg-card/50 rounded-md">
+                <p className="font-medium text-foreground dark:text-foreground mb-2">
+                  {t('vectorSearchSettings.initial-deployment')}
+                </p>
+                <ol className="list-decimal list-inside space-y-1.5">
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm install -g wrangler</code>
+                    {t('vectorSearchSettings.then')}
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">wrangler login</code>
+                  </li>
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">
+                      {`npx wrangler vectorize create github-stars --dimensions=${formDimensions} --metric=cosine`} {/* i18n-allow-literal */}
+                    </code>
+                  </li>
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">cd cloudflare-worker && npm install</code>
+                  </li>
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">wrangler secret put AUTH_TOKEN</code> {/* i18n-allow-literal */}
+                  </li>
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm run deploy</code> {/* i18n-allow-literal */}
+                  </li>
+                </ol>
+              </div>
+
+              {/* 更新部署 */}
+              <div className="p-3 bg-accent/50 dark:bg-card/50 rounded-md">
+                <p className="font-medium text-foreground dark:text-foreground mb-2">
+                  {t('vectorSearchSettings.redeploy-after-code-changes')}
+                </p>
+                <ol className="list-decimal list-inside space-y-1.5">
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">cd cloudflare-worker</code>
+                  </li>
+                  <li>
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm run deploy</code> {/* i18n-allow-literal */}
+                    {t('vectorSearchSettings.if-dependencies-changed-run')}
+                    <code className="bg-accent dark:bg-muted px-1.5 py-0.5 rounded text-xs">npm install</code>
+                    {t('vectorSearchSettings.text')}
+                  </li>
+                </ol>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {t('vectorSearchSettings.note-redeployment-does-not-require-recreating-th')}
+                </p>
+              </div>
+            </TabsContent>
+          </Tabs>
 
             {/* 模型变更警告 */}
             <div className="rounded-lg border border-border bg-muted/40 p-4 text-muted-foreground">

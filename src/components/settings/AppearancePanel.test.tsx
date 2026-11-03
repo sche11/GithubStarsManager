@@ -1,0 +1,88 @@
+import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * Language settings live in Settings-Appearance (moved out of Settings-General).
+ * Desktop section (#345) stays in Settings-General and must only appear in
+ * the Electron client. Web builds (no bridge) hide it entirely.
+ */
+const mocks = vi.hoisted(() => {
+  const state: Record<string, unknown> = {};
+  const useAppStore = (selector?: (s: Record<string, unknown>) => unknown) =>
+    selector ? selector(state) : state;
+  return {
+    state,
+    useAppStore,
+    isSupported: vi.fn(),
+    getPrefs: vi.fn(),
+  };
+});
+
+vi.mock('../../store/useAppStore', () => ({ useAppStore: mocks.useAppStore }));
+vi.mock('../../services/electronProxy', () => ({
+  DEFAULT_DESKTOP_PREFS: { autoLaunch: false, closeToTray: true, minimizeToTray: true },
+  desktopBridge: {
+    isSupported: mocks.isSupported,
+    getPrefs: mocks.getPrefs,
+    setAutoLaunch: vi.fn(),
+    setCloseToTray: vi.fn(),
+    setMinimizeToTray: vi.fn(),
+  },
+}));
+vi.mock('../UpdateChecker', () => ({ UpdateChecker: () => null }));
+vi.mock('./ThemeSettingsCard', () => ({ ThemeSettingsCard: () => null }));
+vi.mock('../../features/settings/hooks/useGitHubTokenActions', () => ({
+  useGitHubTokenActions: () => ({
+    tokenInput: '',
+    isSaving: false,
+    setTokenInput: vi.fn(),
+    updateToken: vi.fn(),
+  }),
+}));
+
+import { makeT } from '../../i18n/useT';
+import { AppearancePanel } from './AppearancePanel';
+import { GeneralPanel } from './GeneralPanel';
+
+const t = makeT('zh', 'app');
+
+beforeEach(() => {
+  vi.clearAllMocks();
+    Object.assign(mocks.state, { language: 'zh', setLanguage: vi.fn(), user: null });
+});
+
+describe('AppearancePanel language settings', () => {
+  it('renders the language grid inside Appearance (not General)', () => {
+    const { container } = render(<AppearancePanel t={t} />);
+    expect(screen.getByRole('radiogroup', { name: t('generalPanel.language-settings') })).toBeTruthy();
+    const languageGrid = container.querySelector('[aria-labelledby="language-settings-title"]');
+    expect(languageGrid?.className ?? '').toContain('w-full');
+    expect(languageGrid?.className ?? '').toContain('grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]');
+    expect(languageGrid?.className ?? '').not.toContain('max-w-lg');
+  });
+
+  it('no longer renders language settings inside General', () => {
+    mocks.isSupported.mockReturnValue(false);
+    render(<GeneralPanel t={t} />);
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+  });
+});
+
+describe('GeneralPanel desktop section', () => {
+  it('hides the desktop section on web (no Electron bridge)', () => {
+    mocks.isSupported.mockReturnValue(false);
+    render(<GeneralPanel t={t} />);
+    expect(screen.queryByText('桌面选项')).toBeNull();
+    expect(screen.queryByLabelText('开机自动启动')).toBeNull();
+  });
+
+  it('shows auto-launch and tray toggles in the Electron client', async () => {
+    mocks.isSupported.mockReturnValue(true);
+    mocks.getPrefs.mockResolvedValue({ autoLaunch: false, closeToTray: true, minimizeToTray: true });
+    render(<GeneralPanel t={t} />);
+    expect(await screen.findByText('桌面选项')).toBeTruthy();
+    expect(screen.getByLabelText('开机自动启动')).toBeTruthy();
+    expect(screen.getByLabelText('关闭时最小化到托盘')).toBeTruthy();
+    expect(screen.getByLabelText('最小化时隐藏到托盘')).toBeTruthy();
+  });
+});

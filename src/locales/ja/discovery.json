@@ -1,11 +1,35 @@
 {
+  "externalFeeds": {
+    "manage": "外部の発見フィード",
+    "manageRss": "RSS ディスカバリーチャンネル",
+    "name": "チャンネル名",
+    "url": "HTTPS フィード URL",
+    "add": "フィードを追加",
+    "checking": "フィードを確認中…",
+    "copy": "コピー",
+    "copied": "コピーしました",
+    "rssFormat": "公開 RSS/Atom フィードの URL を貼り付けてください。アプリはその中で言及されている GitHub リポジトリのリンクを抽出します（1 回につき先頭 30 件）。",
+    "rss-invalid": "フィード内に GitHub リポジトリのリンクが見つかりませんでした。",
+    "remove": "{{name}} を削除",
+    "format": "公開 HTTPS リンクを貼り付けてください。JSON レスポンスの repositories フィールドに GitHub リポジトリを列挙します（公開リポジトリ最大 30 件）。",
+    "cors-note": "サイトはブラウザーからの CORS リクエストを許可する必要があります。GitHub トークンは送信されません。",
+    "invalid": "名前と有効な HTTPS URL を入力してください。",
+    "duplicate": "既に追加済みか、10 件の上限に達しています。",
+    "invalid-format": "JSON に有効なリポジトリ一覧がありません。",
+    "cors": "フィードを読み取れません。URL と CORS 設定を確認してください。",
+    "unreadable": "フィードを読み取れません。URL、サイトの状態、JSON 形式を確認してください。"
+  },
   "discoverySidebar": {
     "just-now": "ただ",
     "m-ago": "数分前",
     "h-ago": "数時間前",
+    "discovery-label": "発見",
     "discovery-channels": "ディスカバリーチャンネル",
     "manage-channels": "発見チャンネルを管理",
-    "refresh-all": "すべて更新"
+    "refresh-all": "すべて更新",
+    "channels-section": "チャンネル",
+    "sources-section": "取得元",
+    "channel-count": "{{count}} 件"
   },
   "discoveryView": {
     "all-loaded": "すべてロードされました",
@@ -80,7 +104,21 @@
     "platform-filter-v1": "プラットフォームフィルター: {{v1}}",
     "items-count": "{{currentCount}} 個のアイテム",
     "items-count-with-total": "{{currentCount}} 個のアイテム (合計 {{totalCount}} 個のアイテム)",
-    "ai": "AI"
+    "ai": "AI",
+    "search-mode": "検索モード",
+    "search-mode-keyword": "キーワード",
+    "search-mode-semantic": "AI セマンティック",
+    "search-mode-semantic-placeholder": "自然言語で探したいリポジトリを説明してください。例：Markdown ノートを管理するコマンドラインツール",
+    "search-mode-hint": "AI セマンティック検索は、公開されているコードをウェブ全体から照合してリポジトリを検索します（GitHub リポジトリのみ）。AI サービスの設定が必要です",
+    "search-phase-expanding": "AI がクエリを分析中…",
+    "search-phase-recalling": "全ウェブから語彙的にリコール中…",
+    "search-phase-enriching": "リポジトリ情報を補完中…",
+    "search-phase-reranking": "AI が選別・並べ替え中…",
+    "semantic-rate-limited": "コード検索のレート制限（429）が発生しました。しばらくしてから再試行してください",
+    "semantic-no-ai-config": "AI サービスが未設定のため、キーワード検索にフォールバックしました",
+    "semantic-fallback-toast": "AI 選別に失敗したため、語彙マッチ順で並べ替えました",
+    "semantic-empty-recall": "全ウェブのコードから関連リポジトリが見つかりませんでした。より具体的な技術キーワードを試してください",
+    "semantic-empty-ai": "AI は関連リポジトリを見つけられませんでした。言い換えや技術キーワードの追加を試してください"
   },
   "weeklyIssueModal": {
     "submission-v1": "貢献番号{{v1}}",
@@ -150,5 +188,4 @@
     "stars-gained": "初回記録から +{{v1}} stars",
     "first-seen": "首位は{{v1}}に初記録"
   }
-
 }

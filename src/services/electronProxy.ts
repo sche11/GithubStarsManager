@@ -7,9 +7,55 @@ import type {
   Release,
 } from '../types';
 import type { ElectronPluginAPI } from '../plugins/types';
+import type { LogEntry } from './logger';
 
 /** Alias of persisted MCP prefs — keep identical to McpServiceConfig to avoid drift. */
 export type McpLocalConfig = McpServiceConfig;
+
+/** Renderer → main diagnostics payload; entries are already sanitized. */
+export interface DiagnosticsIpcPayload {
+  /** Renderer debug flag piggybacked so main-process capture level follows the same switch. */
+  debugMode: boolean;
+  entries: LogEntry[];
+}
+
+/** Network/time window options for reading the main-process journal. */
+export interface DiagnosticsReadOptions {
+  since?: string;
+  limit?: number;
+}
+
+export interface DiagnosticsReadResult {
+  success: boolean;
+  main: LogEntry[];
+  plugins: LogEntry[];
+  error?: string;
+}
+
+export interface DiagnosticsExportPayload {
+  /** null = all history; otherwise hours back (1..168). */
+  windowHours: number | null;
+  frontendLogs: LogEntry[];
+  backendLogs: LogEntry[];
+  networkEntries: LogEntry[];
+  environment?: Record<string, unknown>;
+  sanitizationNote?: string;
+}
+
+export interface DiagnosticsExportResult {
+  success: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  error?: string;
+}
+
+export interface DiagnosticsElectronAPI {
+  append: (payload: DiagnosticsIpcPayload) => Promise<{ success: boolean; accepted?: number; error?: string }>;
+  /** One-way send (ipcRenderer.send) used on pagehide/beforeunload. */
+  flush: (payload: DiagnosticsIpcPayload) => void;
+  read: (options?: DiagnosticsReadOptions) => Promise<DiagnosticsReadResult>;
+  exportBundle: (payload: DiagnosticsExportPayload) => Promise<DiagnosticsExportResult>;
+}
 
 /** Secrets stay in main-process memory only (IPC snapshot); not written to disk by MCP server. */
 export interface McpVectorRuntimeConfig {
@@ -68,9 +114,32 @@ interface ElectronAPI {
    * X 推文频道鉴权路径：主进程代发 x.com GraphQL / 静态资源 GET 请求
    * （带用户的 auth_token/ct0 Cookie 与 Bearer，绕开渲染进程 CORS）
    */
-  xFetchGraphQL?: (url: string, auth: { authToken: string; ct0: string }) => Promise<{ success: boolean; body?: string; error?: string }>;
+  xFetchGraphQL?: (url: string, auth: { authToken: string; ct0: string } | null) => Promise<{ success: boolean; body?: string; error?: string }>;
   /** Telegram 频道：主进程代抓 t.me/s/<name> 公开预览 HTML（可选 before 游标翻历史页） */
   telegramFetchChannel?: (channel: string, before?: string) => Promise<{ success: boolean; html?: string; error?: string }>;
+  /**
+   * WebDAV：主进程代发 DAV 请求（渲染进程 webSecurity 开启且 file:// 源同样受 CORS 约束，
+   * 桌面版又不带后端，只能由主进程代发）。响应体以文本原样返回，供上层还原 Response。
+   */
+  webdavRequest?: (params: {
+    url: string;
+    method: string;
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+  }) => Promise<{
+    success: boolean;
+    status?: number;
+    statusText?: string;
+    body?: string;
+    contentType?: string;
+    error?: string;
+    /** 主进程网络栈失败时的最底层错误码（如 ECONNREFUSED / ENOTFOUND / DEPTH_ZERO_SELF_SIGNED_CERT） */
+    causeCode?: string;
+    /** 最底层错误的原始描述（如 "connect ECONNREFUSED 10.0.0.5:5006"） */
+    causeMessage?: string;
+    timedOut?: boolean;
+  }>;
   xAuth?: {
     save: (auth: { authToken: string; ct0: string }) => Promise<{ success: boolean; error?: string }>;
     get: () => Promise<{ authToken: string; ct0: string } | null>;
@@ -78,7 +147,12 @@ interface ElectronAPI {
   };
   desktop?: DesktopElectronAPI;
   mcp?: McpElectronAPI;
-  plugins?: ElectronPluginAPI & { registry?: { load: () => Promise<import('./pluginRegistryService').PluginRegistryLoadResult> } };
+  /** Diagnostics bridge (desktop only; absent in web builds). */
+  diagnostics?: DiagnosticsElectronAPI;
+  plugins?: ElectronPluginAPI & {
+    registry?: { load: () => Promise<import('./pluginRegistryService').PluginRegistryLoadResult> };
+    marketplace?: import('./pluginMarketplaceService').MarketplaceElectronAPI;
+  };
 }
 
 declare global {
@@ -129,12 +203,14 @@ export const isAllowedXGraphQLUrl = (url: string): boolean =>
 
 /**
  * X 推文频道鉴权路径：经主进程代发 x.com GraphQL / 静态资源请求。非桌面环境返回 null。
- * 限制仅允许 x.com 与 abs.twimg.com 目标，主进程 net.fetch 配置 redirect: 'error'
+ * 限制仅允许 x.com 与 abs.twimg.com 目标，主进程配置 redirect: 'error'
  * 拒绝跨域重定向，防止 Cookie 被转到允许域名之外。
+ * auth 为 null 时走主进程免登录 guest 流程（guest token + Chromium 栈），
+ * 用作鉴权请求被 x.com 边缘 WAF 403（TLS 指纹拦截）时的降级路径。
  */
 export const fetchXGraphQLViaDesktop = async (
   url: string,
-  auth: { authToken: string; ct0: string },
+  auth: { authToken: string; ct0: string } | null,
 ): Promise<string | null> => {
   if (typeof url !== 'string' || !isAllowedXGraphQLUrl(url)) {
     throw new Error('invalid url for x.com fetch');
