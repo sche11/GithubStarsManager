@@ -18,15 +18,11 @@ import { useAppStore } from '../store/useAppStore';
  * 防止初始化/测试环境拿到 undefined 时误判为 browser 绕过默认行为。
  */
 function resolveRouteMode(): RouteMode {
-  try {
-    const raw = useAppStore.getState().routeMode;
-    return raw === 'backend' || raw === 'browser' ? raw : 'auto';
-  } catch {
-    // 部分单测用局部替身 mock 掉 useAppStore（只提供 hook 形态，没有
-    // getState）。生产 store 始终具备 getState，此容错只影响测试替身，
-    // 缺省回到 'auto' —— 与「缺失或非法一律视为 auto」的既有语义一致。
-    return 'auto';
-  }
+  // setup.ts 用只含语言字段的 vi.fn 替身 mock 掉 useAppStore（没有 getState），
+  // 而单测里新建的 service 会走到这里。生产 store 始终具备 getState，因此该
+  // 兜底只影响测试替身，缺省回到 'auto' —— 与「缺失或非法一律视为 auto」一致。
+  const raw = useAppStore.getState?.().routeMode;
+  return raw === 'backend' || raw === 'browser' ? raw : 'auto';
 }
 
 /** 是否应走当前设备网络（绕开后端代理）。 */

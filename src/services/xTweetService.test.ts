@@ -85,6 +85,21 @@ const storage = vi.hoisted(() => {
   };
 });
 
+/**
+ * 本文件的用例都用注入的 transport 桩（graphQL 参数 / window.electronAPI），
+ * 真实网络路径不应被触发。但 defaultXGraphQLTransport 在桌面分支失败后仍会
+ * 尝试 egress 层（同源 /api），而 setup.ts 的 `window.fetch = vi.fn()` 返回
+ * undefined，导致 `.ok` 读取抛出 TypeError，把原本应上抛的桌面错误吞掉。
+ * 这里在本文件内固定 egress 地址为 null，让真实网络分支整体不参与。
+ * （只影响本文件：vi.mock 的作用域按测试文件隔离。）
+ */
+vi.mock('./egressAdapter', () => ({
+  getEgressBaseUrl: () => null,
+  getEgressHeaders: () => ({ 'Content-Type': 'application/json' }),
+  isEgressAvailable: async () => false,
+  setEgressBaseUrl: () => false,
+}));
+
 vi.mock('./xTweetStorage', () => ({
   xTweetStorage: {
     saveTweets: async (tweets: XStoredTweet[]) => {

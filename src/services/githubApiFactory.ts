@@ -19,9 +19,10 @@ import { shouldBypassBackend } from './routeMode';
  */
 function attachEgressIfAvailable(api: GitHubApiService | GitHubListsApiService): void {
   const egressUrl = getEgressBaseUrl();
-  // 上游测试用局部替身 mock 掉服务构造器（只实现被测方法），替身上没有
-  // setBackendUrl。真实 service 始终具备该方法，因此这里的存在性判断
-  // 不会改变生产路径，只保证「代理不可用时 attach 是空操作」这一语义。
+  // 「代理不可用」= 没有地址，或构造出来的服务不支持重定向。上游多个 hook
+  // 单测用只实现被测方法的构造器替身 mock 掉 GitHubApiService，替身上没有
+  // setBackendUrl；egress 同源默认值始终非空，不判存在性会在测试里抛
+  // TypeError 并打断整条业务链路。真实 service 始终具备该方法，生产路径不变。
   if (egressUrl && !shouldBypassBackend() && typeof api.setBackendUrl === 'function') {
     api.setBackendUrl(egressUrl);
   }
